@@ -76,12 +76,16 @@ mod handlers {
         println!("Requesting WireGuard peer from {}...", queue_url);
         let provision = client.provision(&worker_name).await
             .context("Failed to provision WireGuard peer")?;
-        println!("Assigned WireGuard IP: {}", provision.wg_ip);
+        let wg_ip = provision.wg_ip.as_ref()
+            .context("wg_ip missing from provision response")?;
+        let peer_id = provision.peer_id.as_ref()
+            .context("peer_id missing from provision response")?;
+        println!("Assigned WireGuard IP: {}", wg_ip);
 
         println!("Configuring WireGuard...");
         wireguard::configure(&provision).await
             .context("WireGuard configuration failed")?;
-        println!("WireGuard tunnel up ({})", provision.wg_ip);
+        println!("WireGuard tunnel up ({})", wg_ip);
 
         println!("Downloading rpc-server...");
         let rpc_path = rpc::ensure_rpc_server().await
@@ -93,8 +97,8 @@ mod handlers {
         match client.register(
             &worker_id,
             &worker_name,
-            &provision.wg_ip,
-            &provision.peer_id,
+            wg_ip,
+            peer_id,
             gpu_info.has_gpu,
             gpu_info.vram_gb,
             rpc_port,
@@ -108,8 +112,8 @@ mod handlers {
             api_key:     api_key.to_string(),
             worker_id:   worker_id.clone(),
             worker_name: worker_name.clone(),
-            wg_ip:       provision.wg_ip.clone(),
-            wg_peer_id:  provision.peer_id.clone(),
+            wg_ip:       wg_ip.clone(),
+            wg_peer_id:  peer_id.clone(),
             rpc_port,
             gpu:         gpu_info.has_gpu,
             vram_gb:     gpu_info.vram_gb,
