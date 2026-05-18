@@ -23,6 +23,8 @@ struct RegisterRequest<'a> {
     gpu:        bool,
     vram_gb:    f64,
     rpc_port:   u16,
+    #[serde(default)]
+    models:     Vec<String>,
 }
 
 #[derive(Serialize)]
