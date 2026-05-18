@@ -97,7 +97,7 @@ jobs:
           git tag -a "$TAG" -m "Release $TAG"
           git push origin "$TAG"
           gh release create "$TAG" --title "$TAG" --notes "" \
-            "target/release/akai-agent#akai-agent-linux-x86_64"
+            "target/release/akai-agent#akai-agent"
           echo "sha256=$SHA256" >> $GITHUB_OUTPUT
           echo "new_tag=$TAG"   >> $GITHUB_OUTPUT
 
@@ -122,11 +122,11 @@ jobs:
             version "${TAG#v}"
             license "MIT"
             on_linux do
-              url "${BASE}/akai-agent-linux-x86_64"
+              url "${BASE}/akai-agent"
               sha256 "${SHA}"
             end
             def install
-              bin.install "akai-agent-linux-x86_64" => "akai-agent"
+              bin.install "akai-agent" => "akai-agent"
             end
             test do
               assert_match "akai-agent", shell_output("#{bin}/akai-agent --help")

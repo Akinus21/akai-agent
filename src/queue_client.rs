@@ -40,9 +40,11 @@ pub struct ProvisionResponse {
     pub wg_ip:               Option<String>,
     pub peer_id:             Option<String>,
     pub server_public_key:   Option<String>,
-    pub endpoint:            Option<String>,
+    pub endpoint:             Option<String>,
     pub dns:                 Option<String>,
     pub allowed_ips:         Option<String>,
+    #[serde(alias = "wg_server_endpoint")]
+    pub wg_server_endpoint:   Option<String>,
 }
 
 #[derive(Deserialize, Debug)]

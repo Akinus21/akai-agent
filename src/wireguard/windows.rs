@@ -12,6 +12,7 @@ pub fn configure(provision: &ProvisionResponse) -> Result<()> {
     let server_public_key = provision.server_public_key.as_ref()
         .context("server_public_key missing from provision response")?;
     let endpoint = provision.endpoint.as_ref()
+        .or(provision.wg_server_endpoint.as_ref())
         .context("endpoint missing from provision response")?;
 
     let config_dir = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
