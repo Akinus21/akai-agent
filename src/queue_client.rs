@@ -79,7 +79,7 @@ impl QueueClient {
         if !resp.status().is_success() {
             bail!("provision failed: {} — {}", resp.status(), resp.text().await?);
         }
-        Ok(serde_json::from_str(&body)?)
+        Ok(resp.json().await?)
     }
 
     pub async fn register(
