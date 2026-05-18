@@ -118,7 +118,7 @@ pub async fn download_latest() -> Result<()> {
         let mut found = false;
         for entry in archive.entries()? {
             let mut entry = entry?;
-            let name = entry.name().to_string();
+            let name = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
 
             if name.ends_with(binary_name()) || name == binary_name() {
                 entry.unpack(&dest)?;
