@@ -35,13 +35,14 @@ struct HeartbeatRequest {
 
 #[derive(Deserialize, Debug)]
 pub struct ProvisionResponse {
-    pub wg_ip:           String,
-    pub peer_id:         String,
-    pub private_key:     String,
-    pub server_public_key: String,
-    pub endpoint:        String,
-    pub dns:             Option<String>,
-    pub allowed_ips:     Option<String>,
+    #[serde(alias = "wg_private_key")]
+    pub private_key:         Option<String>,
+    pub wg_ip:               Option<String>,
+    pub peer_id:             Option<String>,
+    pub server_public_key:   Option<String>,
+    pub endpoint:            Option<String>,
+    pub dns:                 Option<String>,
+    pub allowed_ips:         Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
