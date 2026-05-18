@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
+use flate2::read::GzDecoder;
 
 const GITHUB_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
 const USER_AGENT: &str = concat!("akai-agent/", env!("CARGO_PKG_VERSION"));
@@ -14,11 +15,11 @@ pub fn rpc_binary_path() -> PathBuf {
 
 fn asset_pattern() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux",   "x86_64")  => "llama-*-bin-ubuntu-x64.zip",
-        ("linux",   "aarch64") => "llama-*-bin-ubuntu-arm64.zip",
-        ("macos",   "aarch64") => "llama-*-bin-macos-arm64.zip",
-        ("macos",   "x86_64")  => "llama-*-bin-macos-x64.zip",
-        ("windows", "x86_64")  => "llama-*-bin-win-cuda-cu12.2.0-x64.zip",
+        ("linux",   "x86_64")  => "llama-*-bin-ubuntu-x64.tar.gz",
+        ("linux",   "aarch64") => "llama-*-bin-ubuntu-arm64.tar.gz",
+        ("macos",   "aarch64") => "llama-*-bin-macos-arm64.tar.gz",
+        ("macos",   "x86_64")  => "llama-*-bin-macos-x64.tar.gz",
+        ("windows", "x86_64")  => "llama-*-bin-win-cuda-12.4-x64.zip",
         (os, arch)             => panic!("Unsupported platform: {os}/{arch}"),
     }
 }
@@ -105,34 +106,70 @@ pub async fn download_latest() -> Result<()> {
         .bytes().await?;
 
     std::fs::create_dir_all(dest.parent().unwrap())?;
-    let cursor = std::io::Cursor::new(bytes.as_ref());
-    let mut archive = zip::ZipArchive::new(cursor)?;
 
-    let mut found = false;
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        let name = file.name().to_string();
+    let is_gz = asset["name"].as_str()
+        .map(|n| n.ends_with(".tar.gz"))
+        .unwrap_or(false);
 
-        if name.ends_with(binary_name()) {
-            let mut out = std::fs::File::create(&dest)?;
-            std::io::copy(&mut file, &mut out)?;
-            found = true;
+    if is_gz {
+        let decoder = GzDecoder::new(bytes.as_ref());
+        let mut archive = tar::Archive::new(decoder);
+
+        let mut found = false;
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let name = entry.name().to_string();
+
+            if name.ends_with(binary_name()) || name == binary_name() {
+                entry.unpack(&dest)?;
+                found = true;
+            }
+
+            #[cfg(target_os = "linux")]
+            if name.ends_with(".so") || name.contains(".so.") {
+                let lib_dir = crate::config::data_dir().join("lib");
+                std::fs::create_dir_all(&lib_dir)?;
+                let lib_name = std::path::Path::new(&name)
+                    .file_name().unwrap_or_default();
+                let lib_dest = lib_dir.join(lib_name);
+                let mut out = std::fs::File::create(lib_dest)?;
+                std::io::copy(&mut entry, &mut out)?;
+            }
         }
 
-        #[cfg(target_os = "linux")]
-        if name.ends_with(".so") || name.contains(".so.") {
-            let lib_dir = crate::config::data_dir().join("lib");
-            std::fs::create_dir_all(&lib_dir)?;
-            let lib_name = std::path::Path::new(&name)
-                .file_name().unwrap_or_default();
-            let lib_dest = lib_dir.join(lib_name);
-            let mut out = std::fs::File::create(lib_dest)?;
-            std::io::copy(&mut file, &mut out)?;
+        if !found {
+            bail!("rpc-server binary not found inside the downloaded tarball");
         }
-    }
+    } else {
+        let cursor = std::io::Cursor::new(bytes.as_ref());
+        let mut archive = zip::ZipArchive::new(cursor)?;
 
-    if !found {
-        bail!("rpc-server binary not found inside the downloaded zip");
+        let mut found = false;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            let name = file.name().to_string();
+
+            if name.ends_with(binary_name()) {
+                let mut out = std::fs::File::create(&dest)?;
+                std::io::copy(&mut file, &mut out)?;
+                found = true;
+            }
+
+            #[cfg(target_os = "linux")]
+            if name.ends_with(".so") || name.contains(".so.") {
+                let lib_dir = crate::config::data_dir().join("lib");
+                std::fs::create_dir_all(&lib_dir)?;
+                let lib_name = std::path::Path::new(&name)
+                    .file_name().unwrap_or_default();
+                let lib_dest = lib_dir.join(lib_name);
+                let mut out = std::fs::File::create(lib_dest)?;
+                std::io::copy(&mut file, &mut out)?;
+            }
+        }
+
+        if !found {
+            bail!("rpc-server binary not found inside the downloaded zip");
+        }
     }
 
     #[cfg(unix)]

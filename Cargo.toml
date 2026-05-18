@@ -24,6 +24,8 @@ dirs               = "5"
 sysinfo            = "0.30"
 hostname           = "0.3"
 zip                = "0.6"
+flate2             = "1.0"
+tar                = "0.4"
 
 [profile.release]
 opt-level     = 3
