@@ -80,7 +80,9 @@ impl QueueClient {
         if !resp.status().is_success() {
             bail!("provision failed: {} — {}", resp.status(), resp.text().await?);
         }
-        Ok(resp.json().await?)
+        let body = resp.text().await?;
+        eprintln!("DEBUG provision response: {}", body);
+        Ok(serde_json::from_str(&body)?)
     }
 
     pub async fn register(
