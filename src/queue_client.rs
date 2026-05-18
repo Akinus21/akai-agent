@@ -40,11 +40,10 @@ pub struct ProvisionResponse {
     pub wg_ip:               Option<String>,
     pub peer_id:             Option<String>,
     pub server_public_key:   Option<String>,
-    pub endpoint:             Option<String>,
+    #[serde(alias = "server_endpoint")]
+    pub endpoint:            Option<String>,
     pub dns:                 Option<String>,
     pub allowed_ips:         Option<String>,
-    #[serde(alias = "wg_server_endpoint")]
-    pub wg_server_endpoint:   Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -80,8 +79,6 @@ impl QueueClient {
         if !resp.status().is_success() {
             bail!("provision failed: {} — {}", resp.status(), resp.text().await?);
         }
-        let body = resp.text().await?;
-        eprintln!("DEBUG provision response: {}", body);
         Ok(serde_json::from_str(&body)?)
     }
 
