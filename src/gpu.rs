@@ -40,8 +40,8 @@ fn detect_nvidia() -> Option<GpuInfo> {
     }
 
     let name = line[0].trim().to_string();
-    let vram_str = line[1].trim().replace("MiB", "").replace("B", "").trim();
-    let vram_gb = vram_str.parse::<f64>().ok()? / 1024.0;
+    let vram_str = line[1].trim().replace("MiB", "").replace("B", "");
+    let vram_gb = vram_str.trim().parse::<f64>().ok()? / 1024.0;
 
     Some(GpuInfo {
         has_gpu: true,
@@ -69,8 +69,8 @@ fn detect_rocm() -> Option<GpuInfo> {
     }
 
     let name = line[0].trim().to_string();
-    let vram_str = line[1].trim().replace("MiB", "").replace("B", "").trim();
-    let vram_gb = vram_str.parse::<f64>().ok()? / 1024.0;
+    let vram_str = line[1].trim().replace("MiB", "").replace("B", "");
+    let vram_gb = vram_str.trim().parse::<f64>().ok()? / 1024.0;
 
     Some(GpuInfo {
         has_gpu: true,
