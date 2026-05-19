@@ -68,13 +68,67 @@ fn path_with_homebrew() -> String {
     paths.join(":")
 }
 
+fn is_ostree() -> bool {
+    std::path::Path::new("/ostree").exists()
+        || Command::new("which")
+            .arg("rpm-ostree")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+}
+
+fn can_sudo() -> bool {
+    Command::new("sudo")
+        .args(["-n", "true"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn detect_pkg_manager() -> &'static str {
+    if is_ostree() {
+        return "rpm-ostree";
+    }
     for cmd in &["apt-get", "dnf", "yum", "zypper", "pacman"] {
         if Command::new("which").arg(cmd).output().map(|o| o.status.success()).unwrap_or(false) {
             return cmd;
         }
     }
     "unknown"
+}
+
+fn homebrew_install_build_tools() -> Result<()> {
+    println!("  Installing build tools via Homebrew (works on atomic/immutable distros)...");
+    let brew = find_in_paths("brew")
+        .context("Homebrew not found. On atomic distros like Silverblue, install Homebrew:\n  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")?;
+
+    let status = Command::new(&brew)
+        .args(["install", "cmake", "gcc", "git"])
+        .env("PATH", path_with_homebrew())
+        .status()
+        .context("Failed to run brew install")?;
+
+    if !status.success() {
+        bail!("Homebrew build tools installation failed");
+    }
+    Ok(())
+}
+
+fn homebrew_install_cuda() -> Result<()> {
+    let brew = find_in_paths("brew")
+        .context("Homebrew not found")?;
+
+    println!("  Installing CUDA toolkit via Homebrew...");
+    let status = Command::new(&brew)
+        .args(["install", "cuda"])
+        .env("PATH", path_with_homebrew())
+        .status()
+        .context("Failed to run brew install cuda")?;
+
+    if !status.success() {
+        bail!("Homebrew CUDA installation failed");
+    }
+    Ok(())
 }
 
 pub fn install_cuda_toolkit() -> Result<()> {
@@ -84,46 +138,80 @@ pub fn install_cuda_toolkit() -> Result<()> {
     }
 
     println!("  Installing CUDA toolkit...");
-    let pkg_mgr = detect_pkg_manager();
-    let status = match pkg_mgr {
-        "apt-get" => {
-            println!("  Adding NVIDIA CUDA repository for Ubuntu/Debian...");
-            Command::new("sh")
-                .args(["-c", "wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && dpkg -i /tmp/cuda-keyring_1.1-1_all.deb && apt-get update -qq && apt-get install -y cuda-toolkit"])
-                .status()
-        }
-        "dnf" | "yum" => {
-            println!("  Installing CUDA toolkit via dnf...");
-            Command::new("sh")
-                .args(["-c", "dnf install -y cuda-toolkit || yum install -y cuda-toolkit"])
-                .status()
-        }
-        "zypper" => {
-            println!("  Installing CUDA toolkit via zypper...");
-            Command::new("sh")
-                .args(["-c", "zypper install -y cuda-toolkit"])
-                .status()
-        }
-        "pacman" => {
-            println!("  Installing CUDA toolkit via pacman (CUDA is in AUR)...");
-            Command::new("sh")
-                .args(["-c", "pacman -S --noconfirm cuda || pacman -S --noconfirm cuda-toolkit"])
-                .status()
-        }
-        _ => {
-            bail!("Unsupported package manager. Install CUDA toolkit manually from https://developer.nvidia.com/cuda-downloads");
-        }
-    }.context("Failed to run package manager")?;
 
-    if !status.success() {
-        bail!("CUDA toolkit installation failed. Install manually from https://developer.nvidia.com/cuda-downloads");
+    if is_ostree() {
+        if find_in_paths("brew").is_some() {
+            match homebrew_install_cuda() {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("  Homebrew CUDA install failed: {}", e);
+                    eprintln!("  On Silverblue/atomic distros, install CUDA toolkit inside a Distrobox container:");
+                    eprintln!("    distrobox enter --name cuda-builder --image ubuntu:24.04");
+                    eprintln!("    # Then inside the container:");
+                    eprintln!("    # apt install nvidia-cuda-toolkit");
+                    bail!("CUDA toolkit not available. Use Distrobox or install manually.");
+                }
+            }
+        } else {
+            eprintln!("  On Silverblue/atomic distros, NVIDIA CUDA requires one of:");
+            eprintln!("    1. Install Homebrew and retry (recommended)");
+            eprintln!("    2. Use a Distrobox container with CUDA toolkit");
+            eprintln!("    3. Layer the package: rpm-ostree install cuda-toolkit (requires reboot)");
+            if can_sudo() {
+                eprintln!("  Attempting rpm-ostree install (will require reboot)...");
+                let status = Command::new("sudo")
+                    .args(["rpm-ostree", "install", "-y", "cuda-toolkit"])
+                    .status()
+                    .context("Failed to run rpm-ostree install")?;
+
+                if status.success() {
+                    bail!("CUDA toolkit installed via rpm-ostree. A reboot is required before continuing.\n  Run `akai-agent start` after reboot.");
+                }
+            }
+            bail!("CUDA toolkit not available on this atomic distro. Install Homebrew or use Distrobox.");
+        }
+    } else {
+        let pkg_mgr = detect_pkg_manager();
+        let status = match pkg_mgr {
+            "apt-get" => {
+                println!("  Adding NVIDIA CUDA repository for Ubuntu/Debian...");
+                Command::new("sudo")
+                    .args(["sh", "-c", "wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && dpkg -i /tmp/cuda-keyring_1.1-1_all.deb && apt-get update -qq && apt-get install -y cuda-toolkit"])
+                    .status()
+            }
+            "dnf" | "yum" => {
+                println!("  Installing CUDA toolkit via dnf...");
+                Command::new("sudo")
+                    .args(["sh", "-c", "dnf install -y cuda-toolkit || yum install -y cuda-toolkit"])
+                    .status()
+            }
+            "zypper" => {
+                println!("  Installing CUDA toolkit via zypper...");
+                Command::new("sudo")
+                    .args(["sh", "-c", "zypper install -y cuda-toolkit"])
+                    .status()
+            }
+            "pacman" => {
+                println!("  Installing CUDA toolkit via pacman...");
+                Command::new("sudo")
+                    .args(["pacman", "-S", "--noconfirm", "cuda"])
+                    .status()
+            }
+            _ => {
+                bail!("Unsupported package manager. Install CUDA toolkit manually from https://developer.nvidia.com/cuda-downloads");
+            }
+        }.context("Failed to run package manager")?;
+
+        if !status.success() {
+            bail!("CUDA toolkit installation failed. Install manually from https://developer.nvidia.com/cuda-downloads");
+        }
     }
 
     if has_nvcc() {
         println!("  CUDA toolkit installed successfully");
         Ok(())
     } else {
-        bail!("CUDA toolkit installation did not make nvcc available. Add /usr/local/cuda/bin to your PATH or install manually.");
+        bail!("CUDA toolkit installed but nvcc not found in PATH.\n  Add /usr/local/cuda/bin to your PATH or install manually.");
     }
 }
 
@@ -133,39 +221,61 @@ pub fn install_build_tools() -> Result<()> {
     }
 
     println!("  Installing build tools (cmake, gcc, git)...");
-    let pkg_mgr = detect_pkg_manager();
-    let status = match pkg_mgr {
-        "apt-get" => {
-            Command::new("sh")
-                .args(["-c", "apt-get update -qq && apt-get install -y cmake build-essential git"])
-                .status()
-        }
-        "dnf" | "yum" => {
-            Command::new("sh")
-                .args(["-c", "dnf install -y cmake gcc gcc-c++ make git || yum install -y cmake gcc gcc-c++ make git"])
-                .status()
-        }
-        "zypper" => {
-            Command::new("sh")
-                .args(["-c", "zypper install -y cmake gcc gcc-c++ make git"])
-                .status()
-        }
-        "pacman" => {
-            Command::new("sh")
-                .args(["-c", "pacman -S --noconfirm cmake gcc make git"])
-                .status()
-        }
-        _ => {
-            bail!("Unsupported package manager. Install cmake, gcc, and git manually.");
-        }
-    }.context("Failed to run package manager")?;
 
-    if !status.success() {
-        bail!("Build tools installation failed. Install cmake, gcc, and git manually.");
+    if is_ostree() {
+        if find_in_paths("brew").is_some() {
+            homebrew_install_build_tools()
+        } else if can_sudo() {
+            eprintln!("  On Silverblue/atomic distros, package installation requires rpm-ostree (needs reboot).");
+            eprintln!("  Installing Homebrew is recommended for a reboot-free experience.");
+            eprintln!("  Attempting rpm-ostree install (will require reboot)...");
+            let status = Command::new("sudo")
+                .args(["rpm-ostree", "install", "-y", "cmake", "gcc", "gcc-c++", "git"])
+                .status()
+                .context("Failed to run rpm-ostree install")?;
+
+            if status.success() {
+                bail!("Build tools installed via rpm-ostree. A reboot is required.\n  Run `akai-agent start` after reboot.");
+            }
+            bail!("Build tools installation failed. On Silverblue, install Homebrew:\n  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"");
+        } else {
+            bail!("No sudo and no Homebrew on atomic distro. Install Homebrew:\n  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"");
+        }
+    } else {
+        let pkg_mgr = detect_pkg_manager();
+        let status = match pkg_mgr {
+            "apt-get" => {
+                Command::new("sudo")
+                    .args(["sh", "-c", "apt-get update -qq && apt-get install -y cmake build-essential git"])
+                    .status()
+            }
+            "dnf" | "yum" => {
+                Command::new("sudo")
+                    .args(["sh", "-c", "dnf install -y cmake gcc gcc-c++ make git || yum install -y cmake gcc gcc-c++ make git"])
+                    .status()
+            }
+            "zypper" => {
+                Command::new("sudo")
+                    .args(["sh", "-c", "zypper install -y cmake gcc gcc-c++ make git"])
+                    .status()
+            }
+            "pacman" => {
+                Command::new("sudo")
+                    .args(["pacman", "-S", "--noconfirm", "cmake", "gcc", "make", "git"])
+                    .status()
+            }
+            _ => {
+                bail!("Unsupported package manager. Install cmake, gcc, and git manually.");
+            }
+        }.context("Failed to run package manager")?;
+
+        if !status.success() {
+            bail!("Build tools installation failed. Install cmake, gcc, and git manually.");
+        }
     }
 
     if !has_build_tools() {
-        bail!("Build tools installed but not found in PATH. You may need to open a new terminal or add Homebrew to your PATH.");
+        bail!("Build tools installed but not found in PATH.\n  You may need to open a new terminal or add Homebrew to your PATH.");
     }
 
     println!("  Build tools installed successfully");
@@ -179,7 +289,7 @@ pub fn build_from_source() -> Result<PathBuf> {
     let env_path = path_with_homebrew();
 
     install_build_tools()?;
-    
+
     let cuda_available = has_cuda();
     let nvcc_available = if cuda_available {
         if !has_nvcc() {
@@ -236,7 +346,11 @@ pub fn build_from_source() -> Result<PathBuf> {
     }
     cmake_cmd.env("PATH", &env_path);
     if nvcc_available {
-        cmake_cmd.env("LD_LIBRARY_PATH", format!("/usr/local/cuda/lib64:{}", std::env::var("LD_LIBRARY_PATH").unwrap_or_default()));
+        let ld_path = format!(
+            "/usr/local/cuda/lib64:/home/linuxbrew/.linuxbrew/lib:{}",
+            std::env::var("LD_LIBRARY_PATH").unwrap_or_default()
+        );
+        cmake_cmd.env("LD_LIBRARY_PATH", &ld_path);
     }
     let status = cmake_cmd.status().context("Failed to run cmake")?;
     if !status.success() {
