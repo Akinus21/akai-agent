@@ -68,19 +68,18 @@ pub fn current_version() -> String {
 
 pub async fn ensure_rpc_server() -> Result<PathBuf> {
     let path = rpc_binary_path();
-    if !path.exists() {
-        download_latest().await?;
-    }
     let lib_dir = crate::config::data_dir().join("lib");
     let libs_valid = lib_dir.exists() && lib_dir.read_dir().ok()
         .map(|mut d| d.filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map(|ext| ext.to_str() == Some("so")).unwrap_or(false))
             .any(|e| e.path().is_file() && e.metadata().map(|m| m.len() > 1024).unwrap_or(false)))
         .unwrap_or(false);
-    if !libs_valid {
+
+    if !path.exists() || !libs_valid {
         if lib_dir.exists() {
             std::fs::remove_dir_all(&lib_dir).ok();
         }
+        std::fs::remove_file(&path).ok();
         download_latest().await?;
     }
     Ok(path)
