@@ -139,16 +139,16 @@ pub async fn download_latest() -> Result<()> {
             #[cfg(target_os = "linux")]
             if name.ends_with(".so") || name.contains(".so.") {
                 let lib_dir = crate::config::data_dir().join("lib");
-                std::fs::create_dir_all(&lib_dir)?;
+                std::fs::create_dir_all(&lib_dir).ok();
                 let lib_name = std::path::Path::new(&name)
                     .file_name().unwrap_or_default();
                 let lib_dest = lib_dir.join(&lib_name);
-                let header = entry.header();
-                if header.entry_type().is_symlink() {
+                let entry_type = entry.header().entry_type();
+                if entry_type.is_symlink() {
                     if let Ok(Some(link_target)) = entry.link_name() {
-                    std::os::unix::fs::symlink(&link_target, &lib_dest).ok();
-                }
-                } else {
+                        let _ = std::os::unix::fs::symlink(&link_target, &lib_dest);
+                    }
+                } else if entry_type.is_file() {
                     let mut out = std::fs::File::create(&lib_dest)?;
                     std::io::copy(&mut entry, &mut out)?;
                 }
