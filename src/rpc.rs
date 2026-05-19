@@ -66,14 +66,35 @@ pub fn current_version() -> String {
         .unwrap_or_default()
 }
 
+fn lib_files_valid(lib_dir: &Path) -> bool {
+    let read_dir = match std::fs::read_dir(lib_dir) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    let mut found_so = false;
+    for entry in read_dir.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.extension().map(|e| e.to_str() == Some("so")).unwrap_or(false) {
+            continue;
+        }
+        if let Ok(meta) = path.symlink_metadata() {
+            if meta.file_type().is_symlink() {
+                let target = std::fs::read_link(&path);
+                if target.map(|t| t.exists()).unwrap_or(false) {
+                    found_so = true;
+                }
+            } else if meta.is_file() && meta.len() > 1024 {
+                found_so = true;
+            }
+        }
+    }
+    found_so
+}
+
 pub async fn ensure_rpc_server() -> Result<PathBuf> {
     let path = rpc_binary_path();
     let lib_dir = crate::config::data_dir().join("lib");
-    let libs_valid = lib_dir.exists() && lib_dir.read_dir().ok()
-        .map(|d| d.filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|ext| ext.to_str() == Some("so")).unwrap_or(false))
-            .any(|e| e.path().is_file() && e.metadata().map(|m| m.len() > 1024).unwrap_or(false)))
-        .unwrap_or(false);
+    let libs_valid = lib_dir.exists() && lib_files_valid(&lib_dir);
 
     if !path.exists() || !libs_valid {
         if lib_dir.exists() {
