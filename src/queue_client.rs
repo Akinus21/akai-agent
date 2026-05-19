@@ -108,7 +108,7 @@ impl QueueClient {
         let resp = self.client
             .post(format!("{}/workers/{}/heartbeat", self.base_url, worker_id))
             .header(self.auth().0, self.auth().1)
-            .json(&HeartbeatRequest { gpu, vram_gb, rpc_port, alive: true })
+            .json(&HeartbeatRequest { gpu, vram_gb, rpc_port, alive: true, models: Vec::new() })
             .send().await?;
         if resp.status() == 404 {
             bail!("404: worker not found in registry");
