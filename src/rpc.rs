@@ -95,6 +95,9 @@ fn lib_files_valid(lib_dir: &Path) -> bool {
                 let size = meta.len();
                 if size > 1024 {
                     found_real_lib = true;
+                } else {
+                    eprintln!("lib_files_valid: {} -> file, size={} (marking broken)", path.display(), size);
+                    found_broken_symlink = true;
                 }
             }
         }
