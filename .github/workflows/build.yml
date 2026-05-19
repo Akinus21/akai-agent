@@ -121,8 +121,12 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: .
-          merge-multiple: true
+          path: artifacts
+
+      - name: Collect artifacts
+        run: |
+          cp artifacts/akai-agent-linux-x86_64/akai-agent ./akai-agent
+          cp artifacts/akai-agent-rpc-cuda-linux-x86_64/akai-agent-rpc-cuda-linux-x86_64.tar.gz ./akai-agent-rpc-cuda-linux-x86_64.tar.gz
 
       - name: Compute new version tag
         id: tag

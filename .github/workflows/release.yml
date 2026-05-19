@@ -121,8 +121,16 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: .
-          merge-multiple: true
+          path: artifacts
+
+      - name: Collect artifacts
+        run: |
+          cp artifacts/akai-agent-linux-x86_64/akai-agent ./akai-agent-linux-x86_64
+          cp artifacts/akai-agent-linux-aarch64/akai-agent ./akai-agent-linux-aarch64 2>/dev/null || true
+          cp artifacts/akai-agent-macos-x86_64/akai-agent ./akai-agent-macos-x86_64 2>/dev/null || true
+          cp artifacts/akai-agent-macos-aarch64/akai-agent ./akai-agent-macos-aarch64 2>/dev/null || true
+          cp artifacts/akai-agent-windows-x86_64/akai-agent.exe ./akai-agent-windows-x86_64.exe 2>/dev/null || true
+          cp artifacts/akai-agent-rpc-cuda-linux-x86_64/akai-agent-rpc-cuda-linux-x86_64.tar.gz ./akai-agent-rpc-cuda-linux-x86_64.tar.gz
 
       - uses: softprops/action-gh-release@v2
         with:
