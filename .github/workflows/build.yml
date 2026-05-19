@@ -87,6 +87,22 @@ jobs:
             done
           done
 
+          echo "=== Bundling CUDA runtime libraries ==="
+          ldd /tmp/rpc-bundle/rpc-server 2>/dev/null | grep -E 'cuda|cublas|cufft|curand|cusparse|cusolver|nvrtc|cublasLt|cudart' | awk '{print $1}' | while read lib; do
+            found=false
+            for search_dir in /usr/local/cuda/lib64 /usr/local/cuda/lib64 /usr/lib/x86_64-linux-gnu /usr/lib64 /lib/x86_64-linux-gnu; do
+              if [ -f "$search_dir/$lib" ]; then
+                cp -L "$search_dir/$lib" /tmp/rpc-bundle/lib/
+                found=true
+                break
+              fi
+            done
+            if [ "$found" = false ]; then
+              locate "$lib" 2>/dev/null | head -1 | xargs -I{} cp -L "{}" /tmp/rpc-bundle/lib/ 2>/dev/null || true
+              find / -name "$lib" -type f 2>/dev/null | head -1 | xargs -I{} cp -L "{}" /tmp/rpc-bundle/lib/ 2>/dev/null || true
+            fi
+          done
+
           for f in /tmp/rpc-bundle/lib/*; do
             case "$(basename "$f")" in
               *.so.*)
@@ -98,6 +114,7 @@ jobs:
 
           echo "=== Bundle contents ==="
           ls -la /tmp/rpc-bundle/
+          echo "=== Bundle libs ==="
           ls -la /tmp/rpc-bundle/lib/
 
       - name: Create archive
