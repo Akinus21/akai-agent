@@ -180,6 +180,7 @@ pub async fn download_latest() -> Result<()> {
                 let lib_dest = lib_dir.join(&lib_name);
                 let entry_type = entry.header().entry_type();
                 if entry_type.is_symlink() {
+                    eprintln!("EXTRACT_SYMLINK: name={} link_target={:?}", name, entry.link_name());
                     if let Ok(Some(link_target)) = entry.link_name() {
                         let _ = std::os::unix::fs::symlink(&link_target, &lib_dest);
                     }
