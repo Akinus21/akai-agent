@@ -368,22 +368,25 @@ pub fn spawn_rpc_server(binary: &Path, port: u16) -> Result<std::process::Child>
     #[cfg(target_os = "linux")]
     {
         let lib_dir = crate::config::data_dir().join("lib");
-        if lib_dir.exists() {
-            let mut ld_path = lib_dir.to_string_lossy().to_string();
-            for dir in &[
-                "/home/linuxbrew/.linuxbrew/lib",
-                "/usr/local/cuda/lib64",
-                "/usr/lib/x86_64-linux-gnu",
-            ] {
-                if std::path::Path::new(dir).exists() {
-                    ld_path.push_str(&format!(":{}", dir));
-                }
+        let mut ld_path = lib_dir.to_string_lossy().to_string();
+        for dir in &[
+            "/home/linuxbrew/.linuxbrew/lib",
+            "/usr/local/cuda/lib64",
+            "/usr/local/cuda/lib",
+            "/usr/lib/x86_64-linux-gnu",
+            "/usr/lib64",
+            "/usr/lib",
+            "/lib/x86_64-linux-gnu",
+            "/lib64",
+        ] {
+            if std::path::Path::new(dir).exists() {
+                ld_path.push_str(&format!(":{}", dir));
             }
-            if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
-                ld_path.push_str(&format!(":{}", existing));
-            }
-            cmd.env("LD_LIBRARY_PATH", ld_path);
         }
+        if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+            ld_path.push_str(&format!(":{}", existing));
+        }
+        cmd.env("LD_LIBRARY_PATH", ld_path);
     }
 
     Ok(cmd.spawn()?)
