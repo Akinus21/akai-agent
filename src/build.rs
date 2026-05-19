@@ -110,7 +110,7 @@ fn detect_distro() -> String {
         if let Ok(contents) = std::fs::read_to_string(p) {
             for line in contents.lines() {
                 if line.starts_with("ID=") {
-                    return line.trim_start_matches("ID=").trim('"').to_string();
+                    return line.trim_start_matches("ID=").trim_matches('"').to_string();
                 }
             }
         }
@@ -123,7 +123,7 @@ fn detect_distro_version() -> String {
         if let Ok(contents) = std::fs::read_to_string(p) {
             for line in contents.lines() {
                 if line.starts_with("VERSION_ID=") {
-                    return line.trim_start_matches("VERSION_ID=").trim('"').to_string();
+                    return line.trim_start_matches("VERSION_ID=").trim_matches('"').to_string();
                 }
             }
         }
@@ -142,7 +142,7 @@ fn nvidia_cuda_repo_url() -> String {
         }),
         "ubuntu" | "pop" => ("ubuntu", {
             let v: f32 = version.parse().unwrap_or(24.04);
-            format!("{:.0}", v * 10)
+            format!("{:.0}", v * 10.0)
         }),
         "debian" => ("debian", version.clone()),
         _ => ("rhel", "9".to_string()),
@@ -214,7 +214,7 @@ pub fn install_cuda_toolkit() -> Result<()> {
         }
         "dnf" => {
             let distro = detect_distro();
-            let (repo_id, repo_url) = if distro == "fedora" {
+            let (_repo_id, repo_url) = if distro == "fedora" {
                 ("cuda-fedora", nvidia_cuda_repo_url())
             } else {
                 ("cuda-rhel", nvidia_cuda_repo_url())

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::fs;
-use std::process::Command;
+
 
 fn find_akai_agent() -> String {
     std::env::var("PATH").unwrap_or_default()
