@@ -145,7 +145,7 @@ pub async fn download_latest() -> Result<()> {
                 let lib_dest = lib_dir.join(&lib_name);
                 let header = entry.header();
                 if header.entry_type().is_symlink() {
-                    if let Some(link_target) = entry.link_name() {
+                    if let Ok(Some(link_target)) = entry.link_name() {
                     std::os::unix::fs::symlink(&link_target, &lib_dest).ok();
                 }
                 } else {
