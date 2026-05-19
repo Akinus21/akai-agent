@@ -179,14 +179,18 @@ pub async fn download_latest() -> Result<()> {
                 let lib_dest = lib_dir.join(&lib_name);
                 let entry_type = entry.header().entry_type();
                 if entry_type.is_symlink() {
-                    eprintln!("EXTRACT_SYMLINK: name={} link_target={:?}", name, entry.link_name());
+                    eprintln!("EXTRACT: symlink name={} link_target={:?}", name, entry.link_name());
                     if let Ok(Some(link_target)) = entry.link_name() {
+                        let _ = std::fs::remove_file(&lib_dest);
                         let _ = std::os::unix::fs::symlink(&link_target, &lib_dest);
                     }
                 } else if entry_type.is_file() {
                     if let Ok(Some(link_target)) = entry.link_name() {
+                        eprintln!("EXTRACT: file-with-link name={} link_target={:?}", name, link_target);
+                        let _ = std::fs::remove_file(&lib_dest);
                         let _ = std::os::unix::fs::symlink(&link_target, &lib_dest);
                     } else {
+                        eprintln!("EXTRACT: regular-file name={} size={}", name, entry.header().size().unwrap_or(0));
                         let mut out = std::fs::File::create(&lib_dest)?;
                         std::io::copy(&mut entry, &mut out)?;
                     }
