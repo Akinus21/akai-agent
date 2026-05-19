@@ -119,14 +119,10 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          path: artifacts
-
-      - name: Collect artifacts
-        run: |
-          cp artifacts/akai-agent-linux-x86_64/akai-agent ./akai-agent
-          cp artifacts/akai-agent-rpc-cuda-linux-x86_64/akai-agent-rpc-cuda-linux-x86_64.tar.gz ./akai-agent-rpc-cuda-linux-x86_64.tar.gz
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN || github.token }}
 
       - name: Compute new version tag
         id: tag
@@ -142,12 +138,16 @@ jobs:
           done
           echo "new_tag=v${MAJ}.${MIN}.${PAT}" >> $GITHUB_OUTPUT
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GH_TOKEN || github.token }}
+          path: artifacts
+
+      - name: Collect artifacts
+        run: |
+          cp artifacts/akai-agent-linux-x86_64/akai-agent ./akai-agent
+          cp artifacts/akai-agent-rpc-cuda-linux-x86_64/akai-agent-rpc-cuda-linux-x86_64.tar.gz ./akai-agent-rpc-cuda-linux-x86_64.tar.gz
+          ls -la ./akai-agent ./akai-agent-rpc-cuda-linux-x86_64.tar.gz
+          sha256sum ./akai-agent ./akai-agent-rpc-cuda-linux-x86_64.tar.gz
 
       - name: Update Cargo.toml version
         run: |
