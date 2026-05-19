@@ -69,25 +69,39 @@ pub fn current_version() -> String {
 fn lib_files_valid(lib_dir: &Path) -> bool {
     let read_dir = match std::fs::read_dir(lib_dir) {
         Ok(d) => d,
-        Err(_) => return false,
+        Err(e) => {
+            eprintln!("lib_files_valid: read_dir error: {}", e);
+            return false;
+        }
     };
     let mut found_so = false;
+    let mut checked = 0;
     for entry in read_dir.filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.extension().map(|e| e.to_str() == Some("so")).unwrap_or(false) {
             continue;
         }
+        checked += 1;
         if let Ok(meta) = path.symlink_metadata() {
             if meta.file_type().is_symlink() {
                 let target = std::fs::read_link(&path);
-                if target.map(|t| t.exists()).unwrap_or(false) {
+                let target_exists = target.map(|t| t.exists()).unwrap_or(false);
+                eprintln!("lib_files_valid: {} -> symlink, target_exists={}", path.display(), target_exists);
+                if target_exists {
                     found_so = true;
                 }
-            } else if meta.is_file() && meta.len() > 1024 {
-                found_so = true;
+            } else if meta.is_file() {
+                let size = meta.len();
+                eprintln!("lib_files_valid: {} -> file, size={}", path.display(), size);
+                if size > 1024 {
+                    found_so = true;
+                }
             }
+        } else {
+            eprintln!("lib_files_valid: symlink_metadata error for {}", path.display());
         }
     }
+    eprintln!("lib_files_valid: checked={}, found_so={}", checked, found_so);
     found_so
 }
 
