@@ -15,7 +15,7 @@ pub fn rpc_binary_path() -> PathBuf {
 
 fn asset_pattern() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux",   "x86_64")  => "llama-*-bin-ubuntu-x64.tar.gz",
+        ("linux",   "x86_64")  => "llama-*-bin-ubuntu-vulkan-x64.tar.gz",
         ("linux",   "aarch64") => "llama-*-bin-ubuntu-arm64.tar.gz",
         ("macos",   "aarch64") => "llama-*-bin-macos-arm64.tar.gz",
         ("macos",   "x86_64")  => "llama-*-bin-macos-x64.tar.gz",
