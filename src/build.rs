@@ -77,6 +77,14 @@ fn is_ostree() -> bool {
             .unwrap_or(false)
 }
 
+fn is_container() -> bool {
+    std::path::Path::new("/run/.containerenv").exists()
+        || std::path::Path::new("/.dockerenv").exists()
+        || std::fs::read_to_string("/proc/1/cgroup")
+            .map(|c| c.contains("docker") || c.contains("lxc") || c.contains("distrobox"))
+            .unwrap_or(false)
+}
+
 fn can_sudo() -> bool {
     Command::new("sudo")
         .args(["-n", "true"])
@@ -86,7 +94,7 @@ fn can_sudo() -> bool {
 }
 
 fn detect_pkg_manager() -> &'static str {
-    if is_ostree() {
+    if is_ostree() && !is_container() {
         return "rpm-ostree";
     }
     for cmd in &["apt-get", "dnf", "yum", "zypper", "pacman"] {
@@ -95,6 +103,51 @@ fn detect_pkg_manager() -> &'static str {
         }
     }
     "unknown"
+}
+
+fn detect_distro() -> String {
+    for p in &["/etc/os-release", "/usr/lib/os-release"] {
+        if let Ok(contents) = std::fs::read_to_string(p) {
+            for line in contents.lines() {
+                if line.starts_with("ID=") {
+                    return line.trim_start_matches("ID=").trim('"').to_string();
+                }
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
+fn detect_distro_version() -> String {
+    for p in &["/etc/os-release", "/usr/lib/os-release"] {
+        if let Ok(contents) = std::fs::read_to_string(p) {
+            for line in contents.lines() {
+                if line.starts_with("VERSION_ID=") {
+                    return line.trim_start_matches("VERSION_ID=").trim('"').to_string();
+                }
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
+fn nvidia_cuda_repo_url() -> String {
+    let distro = detect_distro();
+    let version = detect_distro_version();
+    let (repo_distro, repo_ver) = match distro.as_str() {
+        "fedora" => ("fedora", version.clone()),
+        "rhel" | "centos" | "rocky" | "almalinux" => ("rhel", {
+            let major = version.split('.').next().unwrap_or("9");
+            format!("{}", major)
+        }),
+        "ubuntu" | "pop" => ("ubuntu", {
+            let v: f32 = version.parse().unwrap_or(24.04);
+            format!("{:.0}", v * 10)
+        }),
+        "debian" => ("debian", version.clone()),
+        _ => ("rhel", "9".to_string()),
+    };
+    format!("https://developer.download.nvidia.com/compute/cuda/repos/{}{}/x86_64", repo_distro, repo_ver)
 }
 
 fn homebrew_install_build_tools() -> Result<()> {
@@ -114,23 +167,6 @@ fn homebrew_install_build_tools() -> Result<()> {
     Ok(())
 }
 
-fn homebrew_install_cuda() -> Result<()> {
-    let brew = find_in_paths("brew")
-        .context("Homebrew not found")?;
-
-    println!("  Installing CUDA toolkit via Homebrew...");
-    let status = Command::new(&brew)
-        .args(["install", "cuda"])
-        .env("PATH", path_with_homebrew())
-        .status()
-        .context("Failed to run brew install cuda")?;
-
-    if !status.success() {
-        bail!("Homebrew CUDA installation failed");
-    }
-    Ok(())
-}
-
 pub fn install_cuda_toolkit() -> Result<()> {
     if has_nvcc() {
         println!("  CUDA toolkit already installed (nvcc found)");
@@ -139,72 +175,83 @@ pub fn install_cuda_toolkit() -> Result<()> {
 
     println!("  Installing CUDA toolkit...");
 
-    if is_ostree() {
-        if find_in_paths("brew").is_some() {
-            match homebrew_install_cuda() {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("  Homebrew CUDA install failed: {}", e);
-                    eprintln!("  On Silverblue/atomic distros, install CUDA toolkit inside a Distrobox container:");
-                    eprintln!("    distrobox enter --name cuda-builder --image ubuntu:24.04");
-                    eprintln!("    # Then inside the container:");
-                    eprintln!("    # apt install nvidia-cuda-toolkit");
-                    bail!("CUDA toolkit not available. Use Distrobox or install manually.");
-                }
-            }
-        } else {
-            eprintln!("  On Silverblue/atomic distros, NVIDIA CUDA requires one of:");
-            eprintln!("    1. Install Homebrew and retry (recommended)");
-            eprintln!("    2. Use a Distrobox container with CUDA toolkit");
-            eprintln!("    3. Layer the package: rpm-ostree install cuda-toolkit (requires reboot)");
-            if can_sudo() {
-                eprintln!("  Attempting rpm-ostree install (will require reboot)...");
-                let status = Command::new("sudo")
-                    .args(["rpm-ostree", "install", "-y", "cuda-toolkit"])
-                    .status()
-                    .context("Failed to run rpm-ostree install")?;
-
-                if status.success() {
-                    bail!("CUDA toolkit installed via rpm-ostree. A reboot is required before continuing.\n  Run `akai-agent start` after reboot.");
-                }
-            }
-            bail!("CUDA toolkit not available on this atomic distro. Install Homebrew or use Distrobox.");
+    if is_ostree() && !is_container() {
+        if !can_sudo() {
+            bail!(
+                "CUDA toolkit requires sudo on Silverblue/atomic distros.\n\
+                 Options:\n\
+                 1. Run inside a Distrobox/toolbox container (recommended)\n\
+                 2. Run with sudo: rpm-ostree install cuda-toolkit (requires reboot)\n\
+                 3. Install manually from https://developer.nvidia.com/cuda-downloads"
+            );
         }
-    } else {
-        let pkg_mgr = detect_pkg_manager();
-        let status = match pkg_mgr {
-            "apt-get" => {
-                println!("  Adding NVIDIA CUDA repository for Ubuntu/Debian...");
-                Command::new("sudo")
-                    .args(["sh", "-c", "wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && dpkg -i /tmp/cuda-keyring_1.1-1_all.deb && apt-get update -qq && apt-get install -y cuda-toolkit"])
-                    .status()
-            }
-            "dnf" | "yum" => {
-                println!("  Installing CUDA toolkit via dnf...");
-                Command::new("sudo")
-                    .args(["sh", "-c", "dnf install -y cuda-toolkit || yum install -y cuda-toolkit"])
-                    .status()
-            }
-            "zypper" => {
-                println!("  Installing CUDA toolkit via zypper...");
-                Command::new("sudo")
-                    .args(["sh", "-c", "zypper install -y cuda-toolkit"])
-                    .status()
-            }
-            "pacman" => {
-                println!("  Installing CUDA toolkit via pacman...");
-                Command::new("sudo")
-                    .args(["pacman", "-S", "--noconfirm", "cuda"])
-                    .status()
-            }
-            _ => {
-                bail!("Unsupported package manager. Install CUDA toolkit manually from https://developer.nvidia.com/cuda-downloads");
-            }
-        }.context("Failed to run package manager")?;
 
-        if !status.success() {
-            bail!("CUDA toolkit installation failed. Install manually from https://developer.nvidia.com/cuda-downloads");
+        println!("  Silverblue/atomic distro detected. CUDA requires layered packages via rpm-ostree.");
+        println!("  This will require a REBOOT before the CUDA toolkit is available.");
+        println!("  Alternatively, run akai-agent inside a Distrobox container for a seamless experience.");
+
+        let status = Command::new("sudo")
+            .args(["rpm-ostree", "install", "-y", "cuda-toolkit"])
+            .status()
+            .context("Failed to run rpm-ostree install")?;
+
+        if status.success() {
+            bail!(
+                "CUDA toolkit installed via rpm-ostree. A REBOOT is required.\n\
+                 After reboot, run: akai-agent start"
+            );
         }
+        bail!("rpm-ostree install failed. Try running inside a Distrobox container or install manually.");
+    }
+
+    let pkg_mgr = detect_pkg_manager();
+    let status = match pkg_mgr {
+        "apt-get" => {
+            println!("  Adding NVIDIA CUDA repository...");
+            Command::new("sudo")
+                .args(["sh", "-c", "wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && dpkg -i /tmp/cuda-keyring_1.1-1_all.deb && apt-get update -qq && apt-get install -y cuda-toolkit"])
+                .status()
+        }
+        "dnf" => {
+            let distro = detect_distro();
+            let (repo_id, repo_url) = if distro == "fedora" {
+                ("cuda-fedora", nvidia_cuda_repo_url())
+            } else {
+                ("cuda-rhel", nvidia_cuda_repo_url())
+            };
+            println!("  Adding NVIDIA CUDA repository...");
+            Command::new("sudo")
+                .args(["sh", "-c", &format!(
+                    "dnf config-manager --add-repo={url} && dnf install -y cuda-toolkit",
+                    url = repo_url
+                )])
+                .status()
+        }
+        "yum" => {
+            Command::new("sudo")
+                .args(["sh", "-c", &format!(
+                    "yum-config-manager --add-repo={url} && yum install -y cuda-toolkit",
+                    url = nvidia_cuda_repo_url()
+                )])
+                .status()
+        }
+        "zypper" => {
+            Command::new("sudo")
+                .args(["sh", "-c", "zypper addrepo https://developer.download.nvidia.com/compute/cuda/repos/opensuse15/x86_64/ && zypper install -y cuda-toolkit"])
+                .status()
+        }
+        "pacman" => {
+            Command::new("sudo")
+                .args(["pacman", "-S", "--noconfirm", "cuda"])
+                .status()
+        }
+        _ => {
+            bail!("Unsupported package manager. Install CUDA toolkit manually from https://developer.nvidia.com/cuda-downloads");
+        }
+    }.context("Failed to run package manager")?;
+
+    if !status.success() {
+        bail!("CUDA toolkit installation failed. Install manually from https://developer.nvidia.com/cuda-downloads");
     }
 
     if has_nvcc() {
@@ -222,56 +269,59 @@ pub fn install_build_tools() -> Result<()> {
 
     println!("  Installing build tools (cmake, gcc, git)...");
 
-    if is_ostree() {
+    if is_ostree() && !is_container() {
         if find_in_paths("brew").is_some() {
-            homebrew_install_build_tools()
-        } else if can_sudo() {
-            eprintln!("  On Silverblue/atomic distros, package installation requires rpm-ostree (needs reboot).");
-            eprintln!("  Installing Homebrew is recommended for a reboot-free experience.");
+            return homebrew_install_build_tools();
+        }
+        if can_sudo() {
+            eprintln!("  On Silverblue/atomic distros, Homebrew is recommended for build tools (no reboot).");
+            eprintln!("  Install Homebrew: /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"");
             eprintln!("  Attempting rpm-ostree install (will require reboot)...");
             let status = Command::new("sudo")
                 .args(["rpm-ostree", "install", "-y", "cmake", "gcc", "gcc-c++", "git"])
                 .status()
                 .context("Failed to run rpm-ostree install")?;
-
             if status.success() {
-                bail!("Build tools installed via rpm-ostree. A reboot is required.\n  Run `akai-agent start` after reboot.");
+                bail!("Build tools installed via rpm-ostree. A REBOOT is required.\n  After reboot, run: akai-agent start");
             }
-            bail!("Build tools installation failed. On Silverblue, install Homebrew:\n  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"");
-        } else {
-            bail!("No sudo and no Homebrew on atomic distro. Install Homebrew:\n  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"");
         }
-    } else {
-        let pkg_mgr = detect_pkg_manager();
-        let status = match pkg_mgr {
-            "apt-get" => {
-                Command::new("sudo")
-                    .args(["sh", "-c", "apt-get update -qq && apt-get install -y cmake build-essential git"])
-                    .status()
-            }
-            "dnf" | "yum" => {
-                Command::new("sudo")
-                    .args(["sh", "-c", "dnf install -y cmake gcc gcc-c++ make git || yum install -y cmake gcc gcc-c++ make git"])
-                    .status()
-            }
-            "zypper" => {
-                Command::new("sudo")
-                    .args(["sh", "-c", "zypper install -y cmake gcc gcc-c++ make git"])
-                    .status()
-            }
-            "pacman" => {
-                Command::new("sudo")
-                    .args(["pacman", "-S", "--noconfirm", "cmake", "gcc", "make", "git"])
-                    .status()
-            }
-            _ => {
-                bail!("Unsupported package manager. Install cmake, gcc, and git manually.");
-            }
-        }.context("Failed to run package manager")?;
+        bail!(
+            "No Homebrew and no sudo on atomic distro.\n\
+             Install Homebrew for a reboot-free experience:\n\
+             /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"\n\
+             Or run inside a Distrobox/toolbox container."
+        );
+    }
 
-        if !status.success() {
-            bail!("Build tools installation failed. Install cmake, gcc, and git manually.");
+    let pkg_mgr = detect_pkg_manager();
+    let status = match pkg_mgr {
+        "apt-get" => {
+            Command::new("sudo")
+                .args(["sh", "-c", "apt-get update -qq && apt-get install -y cmake build-essential git"])
+                .status()
         }
+        "dnf" | "yum" => {
+            Command::new("sudo")
+                .args(["sh", "-c", "dnf install -y cmake gcc gcc-c++ make git || yum install -y cmake gcc gcc-c++ make git"])
+                .status()
+        }
+        "zypper" => {
+            Command::new("sudo")
+                .args(["sh", "-c", "zypper install -y cmake gcc gcc-c++ make git"])
+                .status()
+        }
+        "pacman" => {
+            Command::new("sudo")
+                .args(["pacman", "-S", "--noconfirm", "cmake", "gcc", "make", "git"])
+                .status()
+        }
+        _ => {
+            bail!("Unsupported package manager. Install cmake, gcc, and git manually.");
+        }
+    }.context("Failed to run package manager")?;
+
+    if !status.success() {
+        bail!("Build tools installation failed. Install cmake, gcc, and git manually.");
     }
 
     if !has_build_tools() {
