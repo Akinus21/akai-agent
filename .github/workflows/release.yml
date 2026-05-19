@@ -219,10 +219,11 @@ jobs:
               bin.install binary_name => "akai-agent"
               if OS.linux? && Hardware::CPU.intel?
                 resource("rpc-cuda").stage do
-                  share.install "rpc-server" => "akai-agent/rpc-server" if File.exist?("rpc-server")
-                  share.install "llama-rpc-server" => "akai-agent/llama-rpc-server" if File.exist?("llama-rpc-server")
-                  lib_share = share/"akai-agent/lib"
-                  lib_share.install Dir["lib/*"] if File.exist?("lib")
+                  (share/"akai-agent").mkpath
+                  cp "rpc-server", "#{share}/akai-agent/rpc-server" if File.exist?("rpc-server")
+                  cp "llama-rpc-server", "#{share}/akai-agent/llama-rpc-server" if File.exist?("llama-rpc-server")
+                  (share/"akai-agent/lib").mkpath
+                  cp_r "lib/.", "#{share}/akai-agent/lib/" if File.exist?("lib")
                 end
               end
               end
