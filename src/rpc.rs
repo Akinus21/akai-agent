@@ -1,6 +1,9 @@
 use anyhow::{anyhow, bail, Result};
+use std::ffi::OsStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 use flate2::read::GzDecoder;
+use tar::Entry;
 
 const GITHUB_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
 const USER_AGENT: &str = concat!("akai-agent/", env!("CARGO_PKG_VERSION"));
@@ -142,9 +145,15 @@ pub async fn download_latest() -> Result<()> {
                 std::fs::create_dir_all(&lib_dir)?;
                 let lib_name = std::path::Path::new(&name)
                     .file_name().unwrap_or_default();
-                let lib_dest = lib_dir.join(lib_name);
-                let mut out = std::fs::File::create(lib_dest)?;
-                std::io::copy(&mut entry, &mut out)?;
+                let lib_dest = lib_dir.join(&lib_name);
+                let header = entry.header();
+                if header.entry_type().is_symlink() {
+                    let link_target = entry.link_target().unwrap_or_default();
+                    std::os::unix::fs::symlink(&link_target, &lib_dest).ok();
+                } else {
+                    let mut out = std::fs::File::create(&lib_dest)?;
+                    std::io::copy(&mut entry, &mut out)?;
+                }
             }
         }
 
