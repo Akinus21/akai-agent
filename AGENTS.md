@@ -74,6 +74,7 @@ ollama-queue proxy
 | `src/config.rs` | Config struct, load/save, paths |
 | `src/gpu.rs` | GPU detection (nvidia-smi / rocm-smi) |
 | `src/rpc.rs` | Download, version-check, spawn rpc-server |
+| `src/build.rs` | Build rpc-server from source (CUDA detection) |
 | `src/queue_client.rs` | HTTP client for ollama-queue registry API |
 | `src/wireguard/` | Per-OS WireGuard setup (linux/macos/windows) |
 | `src/service/` | systemd / launchd / Windows Service installers |
@@ -89,6 +90,8 @@ Heartbeat returning 404 means the worker fell out of registry → re-register au
 
 ## rpc-server Binary Management
 - Downloaded from: https://github.com/ggml-org/llama.cpp/releases/latest
+- If NVIDIA GPU detected on Linux x86_64 and build tools available: builds from source with CUDA
+- Otherwise: downloads pre-built binary from GitHub Releases
 - GitHub API: GET https://api.github.com/repos/ggml-org/llama.cpp/releases/latest
 - Always include header: `User-Agent: akai-agent/<version>`
 - Stored at: ~/.local/share/akai-agent/rpc-server (Linux/macOS)

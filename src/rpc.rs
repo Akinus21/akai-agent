@@ -15,7 +15,7 @@ pub fn rpc_binary_path() -> PathBuf {
 
 fn asset_pattern() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux",   "x86_64")  => "llama-*-bin-ubuntu-vulkan-x64.tar.gz",
+        ("linux",   "x86_64")  => "llama-*-bin-ubuntu-x64.tar.gz",
         ("linux",   "aarch64") => "llama-*-bin-ubuntu-arm64.tar.gz",
         ("macos",   "aarch64") => "llama-*-bin-macos-arm64.tar.gz",
         ("macos",   "x86_64")  => "llama-*-bin-macos-x64.tar.gz",
@@ -88,6 +88,16 @@ pub async fn ensure_rpc_server() -> Result<PathBuf> {
             std::fs::remove_dir_all(&lib_dir).ok();
         }
         std::fs::remove_file(&path).ok();
+        
+        #[cfg(target_os = "linux")]
+        if crate::build::needs_source_build() && crate::build::has_build_tools() {
+            println!("NVIDIA GPU detected — building rpc-server from source with CUDA...");
+            match crate::build::build_from_source() {
+                Ok(p) => return Ok(p),
+                Err(e) => eprintln!("Source build failed: {}. Falling back to download.", e),
+            }
+        }
+        
         download_latest().await?;
     }
     Ok(path)
@@ -153,18 +163,15 @@ pub async fn download_latest() -> Result<()> {
                 let lib_dest = lib_dir.join(&lib_name);
                 let entry_type = entry.header().entry_type();
                 if entry_type.is_symlink() {
-                    eprintln!("EXTRACT: symlink name={} link_target={:?}", name, entry.link_name());
                     if let Ok(Some(link_target)) = entry.link_name() {
                         let _ = std::fs::remove_file(&lib_dest);
                         let _ = std::os::unix::fs::symlink(&link_target, &lib_dest);
                     }
                 } else if entry_type.is_file() {
                     if let Ok(Some(link_target)) = entry.link_name() {
-                        eprintln!("EXTRACT: file-with-link name={} link_target={:?}", name, link_target);
                         let _ = std::fs::remove_file(&lib_dest);
                         let _ = std::os::unix::fs::symlink(&link_target, &lib_dest);
                     } else {
-                        eprintln!("EXTRACT: regular-file name={} size={}", name, entry.header().size().unwrap_or(0));
                         let mut out = std::fs::File::create(&lib_dest)?;
                         std::io::copy(&mut entry, &mut out)?;
                     }
