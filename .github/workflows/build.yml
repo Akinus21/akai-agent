@@ -59,10 +59,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install CUDA toolkit
+      - name: Install CUDA toolkit 12.4
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y nvidia-cuda-toolkit cmake gcc g++ git
+          sudo apt-get install -y cmake gcc g++ git wget
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y cuda-toolkit-12-4
 
       - name: Clone llama.cpp
         run: |
@@ -72,7 +76,8 @@ jobs:
         run: |
           cd /tmp/llama.cpp
           mkdir build && cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DGGML_RPC=ON -DGGML_CUDA=ON
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DGGML_RPC=ON -DGGML_CUDA=ON \
+            -DCUDAToolkit_ROOT=/usr/local/cuda-12.4
           cmake --build . --config Release -j$(nproc)
 
       - name: Bundle rpc-server + libraries
