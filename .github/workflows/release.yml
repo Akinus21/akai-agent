@@ -217,25 +217,14 @@ jobs:
             def install
               binary_name = stable.url.split("/").last
               bin.install binary_name => "akai-agent"
-            end
-
-            def post_install
               if OS.linux? && Hardware::CPU.intel?
-                begin
-                  resource("rpc-cuda").stage do
-                    rpc_dest = File.expand_path("~/.local/share/akai-agent")
-                    lib_dest = File.join(rpc_dest, "lib")
-                    FileUtils.mkdir_p(lib_dest)
-                    FileUtils.cp("rpc-server", rpc_dest, preserve: true) if File.exist?("rpc-server")
-                    FileUtils.cp("llama-rpc-server", rpc_dest, preserve: true) if File.exist?("llama-rpc-server")
-                    FileUtils.cp_r("lib/.", lib_dest, preserve: true) if File.exist?("lib")
-                    chmod 0755, File.join(rpc_dest, "rpc-server") if File.exist?(File.join(rpc_dest, "rpc-server"))
-                    chmod 0755, File.join(rpc_dest, "llama-rpc-server") if File.exist?(File.join(rpc_dest, "llama-rpc-server"))
-                  end
-                rescue => e
-                  opoo "Failed to install rpc-server with CUDA: #{e}"
-                  opoo "The agent will attempt to build from source on first run."
+                resource("rpc-cuda").stage do
+                  share.install "rpc-server" => "akai-agent/rpc-server" if File.exist?("rpc-server")
+                  share.install "llama-rpc-server" => "akai-agent/llama-rpc-server" if File.exist?("llama-rpc-server")
+                  lib_share = share/"akai-agent/lib"
+                  lib_share.install Dir["lib/*"] if File.exist?("lib")
                 end
+              end
               end
             end
 
