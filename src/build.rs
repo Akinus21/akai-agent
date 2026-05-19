@@ -68,34 +68,140 @@ fn path_with_homebrew() -> String {
     paths.join(":")
 }
 
+fn detect_pkg_manager() -> &'static str {
+    for cmd in &["apt-get", "dnf", "yum", "zypper", "pacman"] {
+        if Command::new("which").arg(cmd).output().map(|o| o.status.success()).unwrap_or(false) {
+            return cmd;
+        }
+    }
+    "unknown"
+}
+
+pub fn install_cuda_toolkit() -> Result<()> {
+    if has_nvcc() {
+        println!("  CUDA toolkit already installed (nvcc found)");
+        return Ok(());
+    }
+
+    println!("  Installing CUDA toolkit...");
+    let pkg_mgr = detect_pkg_manager();
+    let status = match pkg_mgr {
+        "apt-get" => {
+            println!("  Adding NVIDIA CUDA repository for Ubuntu/Debian...");
+            Command::new("sh")
+                .args(["-c", "wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && dpkg -i /tmp/cuda-keyring_1.1-1_all.deb && apt-get update -qq && apt-get install -y cuda-toolkit"])
+                .status()
+        }
+        "dnf" | "yum" => {
+            println!("  Installing CUDA toolkit via dnf...");
+            Command::new("sh")
+                .args(["-c", "dnf install -y cuda-toolkit || yum install -y cuda-toolkit"])
+                .status()
+        }
+        "zypper" => {
+            println!("  Installing CUDA toolkit via zypper...");
+            Command::new("sh")
+                .args(["-c", "zypper install -y cuda-toolkit"])
+                .status()
+        }
+        "pacman" => {
+            println!("  Installing CUDA toolkit via pacman (CUDA is in AUR)...");
+            Command::new("sh")
+                .args(["-c", "pacman -S --noconfirm cuda || pacman -S --noconfirm cuda-toolkit"])
+                .status()
+        }
+        _ => {
+            bail!("Unsupported package manager. Install CUDA toolkit manually from https://developer.nvidia.com/cuda-downloads");
+        }
+    }.context("Failed to run package manager")?;
+
+    if !status.success() {
+        bail!("CUDA toolkit installation failed. Install manually from https://developer.nvidia.com/cuda-downloads");
+    }
+
+    if has_nvcc() {
+        println!("  CUDA toolkit installed successfully");
+        Ok(())
+    } else {
+        bail!("CUDA toolkit installation did not make nvcc available. Add /usr/local/cuda/bin to your PATH or install manually.");
+    }
+}
+
+pub fn install_build_tools() -> Result<()> {
+    if has_build_tools() {
+        return Ok(());
+    }
+
+    println!("  Installing build tools (cmake, gcc, git)...");
+    let pkg_mgr = detect_pkg_manager();
+    let status = match pkg_mgr {
+        "apt-get" => {
+            Command::new("sh")
+                .args(["-c", "apt-get update -qq && apt-get install -y cmake build-essential git"])
+                .status()
+        }
+        "dnf" | "yum" => {
+            Command::new("sh")
+                .args(["-c", "dnf install -y cmake gcc gcc-c++ make git || yum install -y cmake gcc gcc-c++ make git"])
+                .status()
+        }
+        "zypper" => {
+            Command::new("sh")
+                .args(["-c", "zypper install -y cmake gcc gcc-c++ make git"])
+                .status()
+        }
+        "pacman" => {
+            Command::new("sh")
+                .args(["-c", "pacman -S --noconfirm cmake gcc make git"])
+                .status()
+        }
+        _ => {
+            bail!("Unsupported package manager. Install cmake, gcc, and git manually.");
+        }
+    }.context("Failed to run package manager")?;
+
+    if !status.success() {
+        bail!("Build tools installation failed. Install cmake, gcc, and git manually.");
+    }
+
+    if !has_build_tools() {
+        bail!("Build tools installed but not found in PATH. You may need to open a new terminal or add Homebrew to your PATH.");
+    }
+
+    println!("  Build tools installed successfully");
+    Ok(())
+}
+
 pub fn build_from_source() -> Result<PathBuf> {
     let src = source_dir();
     let bin = crate::rpc::rpc_binary_path();
     let lib_dir = data_dir().join("lib");
     let env_path = path_with_homebrew();
 
-    if !has_build_tools() {
-        bail!(
-            "Build tools not found.\n  \
-             Install: brew install cmake gcc git\n  \
-             For CUDA: install CUDA toolkit from https://developer.nvidia.com/cuda-downloads"
-        );
-    }
-
+    install_build_tools()?;
+    
     let cuda_available = has_cuda();
-    let nvcc_available = has_nvcc();
+    let nvcc_available = if cuda_available {
+        if !has_nvcc() {
+            match install_cuda_toolkit() {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("  CUDA toolkit installation failed: {}", e);
+                    eprintln!("  Building without CUDA (CPU-only). GPU will not be used.");
+                    false
+                }
+            }
+        } else {
+            true
+        }
+    } else {
+        false
+    };
 
-    if cuda_available && !nvcc_available {
-        eprintln!("WARNING: NVIDIA GPU detected but CUDA toolkit (nvcc) not found.");
-        eprintln!("  Install CUDA toolkit for GPU acceleration:");
-        eprintln!("  https://developer.nvidia.com/cuda-downloads");
-        eprintln!("  Building without CUDA (CPU-only)...");
-    }
+    println!("Building rpc-server from source (CUDA: {})", nvcc_available);
 
-    println!("Building rpc-server from source (CUDA: {})", cuda_available && nvcc_available);
-
-    let git = find_in_paths("git").unwrap();
-    let cmake = find_in_paths("cmake").unwrap();
+    let git = find_in_paths("git").context("git not found")?;
+    let cmake = find_in_paths("cmake").context("cmake not found")?;
 
     if !src.exists() {
         println!("  Cloning llama.cpp repository...");
@@ -116,6 +222,7 @@ pub fn build_from_source() -> Result<PathBuf> {
     }
 
     let build = build_dir();
+    let _ = std::fs::remove_dir_all(&build);
     std::fs::create_dir_all(&build)?;
 
     println!("  Configuring build...");
@@ -124,10 +231,13 @@ pub fn build_from_source() -> Result<PathBuf> {
     cmake_cmd.arg("-S").arg(&src);
     cmake_cmd.arg("-DCMAKE_BUILD_TYPE=Release");
     cmake_cmd.arg("-DGGML_RPC=ON");
-    if cuda_available && nvcc_available {
+    if nvcc_available {
         cmake_cmd.arg("-DGGML_CUDA=ON");
     }
     cmake_cmd.env("PATH", &env_path);
+    if nvcc_available {
+        cmake_cmd.env("LD_LIBRARY_PATH", format!("/usr/local/cuda/lib64:{}", std::env::var("LD_LIBRARY_PATH").unwrap_or_default()));
+    }
     let status = cmake_cmd.status().context("Failed to run cmake")?;
     if !status.success() {
         bail!("cmake configuration failed. Ensure build dependencies are installed.");
@@ -165,12 +275,12 @@ pub fn build_from_source() -> Result<PathBuf> {
     copy_libs(&build, &lib_dir)?;
 
     if let Ok(mut cfg) = crate::config::load_config() {
-        cfg.rpc_version = if cuda_available && nvcc_available { "source-cuda" } else { "source-cpu" }.to_string();
+        cfg.rpc_version = if nvcc_available { "source-cuda" } else { "source-cpu" }.to_string();
         cfg.rpc_binary = bin.to_string_lossy().to_string();
         let _ = crate::config::save_config(&cfg);
     }
 
-    println!("rpc-server built from source (CUDA: {})", cuda_available && nvcc_available);
+    println!("rpc-server built from source (CUDA: {})", nvcc_available);
     Ok(bin)
 }
 

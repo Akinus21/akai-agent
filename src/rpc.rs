@@ -97,17 +97,9 @@ pub async fn ensure_rpc_server() -> Result<PathBuf> {
         
         #[cfg(target_os = "linux")]
         if crate::build::needs_source_build() {
-            if crate::build::has_build_tools() {
-                println!("NVIDIA GPU detected — building rpc-server from source with CUDA...");
-                match crate::build::build_from_source() {
-                    Ok(p) => return Ok(p),
-                    Err(e) => eprintln!("Source build failed: {}. Falling back to download.", e),
-                }
-            } else {
-                eprintln!("NVIDIA GPU detected but build tools not found.");
-                eprintln!("Install cmake and gcc for CUDA support:");
-                eprintln!("  sudo apt install cmake build-essential");
-                eprintln!("Falling back to CPU-only download.");
+            match crate::build::build_from_source() {
+                Ok(p) => return Ok(p),
+                Err(e) => eprintln!("Source build failed: {}. Falling back to download.", e),
             }
         }
         
