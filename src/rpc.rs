@@ -1,9 +1,6 @@
 use anyhow::{anyhow, bail, Result};
-use std::ffi::OsStr;
-use std::fs;
 use std::path::{Path, PathBuf};
 use flate2::read::GzDecoder;
-use tar::Entry;
 
 const GITHUB_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
 const USER_AGENT: &str = concat!("akai-agent/", env!("CARGO_PKG_VERSION"));
@@ -73,7 +70,7 @@ pub async fn ensure_rpc_server() -> Result<PathBuf> {
     let path = rpc_binary_path();
     let lib_dir = crate::config::data_dir().join("lib");
     let libs_valid = lib_dir.exists() && lib_dir.read_dir().ok()
-        .map(|mut d| d.filter_map(|e| e.ok())
+        .map(|d| d.filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map(|ext| ext.to_str() == Some("so")).unwrap_or(false))
             .any(|e| e.path().is_file() && e.metadata().map(|m| m.len() > 1024).unwrap_or(false)))
         .unwrap_or(false);
@@ -148,7 +145,7 @@ pub async fn download_latest() -> Result<()> {
                 let lib_dest = lib_dir.join(&lib_name);
                 let header = entry.header();
                 if header.entry_type().is_symlink() {
-                    let link_target = entry.link_target().unwrap_or_default();
+                    let link_target = entry.link_name().unwrap_or_default();
                     std::os::unix::fs::symlink(&link_target, &lib_dest).ok();
                 } else {
                     let mut out = std::fs::File::create(&lib_dest)?;
