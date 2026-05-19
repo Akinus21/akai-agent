@@ -78,14 +78,16 @@ fn lib_files_valid(lib_dir: &Path) -> bool {
     let mut found_broken_symlink = false;
     for entry in read_dir.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if !path.extension().map(|e| e.to_str() == Some("so")).unwrap_or(false) {
+        let name = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if !name.contains(".so") {
             continue;
         }
         if let Ok(meta) = path.symlink_metadata() {
             if meta.file_type().is_symlink() {
                 let target = std::fs::read_link(&path);
                 let target_exists = target.as_ref().map(|t| t.exists()).unwrap_or(false);
-                eprintln!("lib_files_valid: {} -> symlink, target_exists={}", path.display(), target_exists);
                 if !target_exists {
                     found_broken_symlink = true;
                 }
@@ -182,8 +184,12 @@ pub async fn download_latest() -> Result<()> {
                         let _ = std::os::unix::fs::symlink(&link_target, &lib_dest);
                     }
                 } else if entry_type.is_file() {
-                    let mut out = std::fs::File::create(&lib_dest)?;
-                    std::io::copy(&mut entry, &mut out)?;
+                    if let Ok(Some(link_target)) = entry.link_name() {
+                        let _ = std::os::unix::fs::symlink(&link_target, &lib_dest);
+                    } else {
+                        let mut out = std::fs::File::create(&lib_dest)?;
+                        std::io::copy(&mut entry, &mut out)?;
+                    }
                 }
             }
         }
