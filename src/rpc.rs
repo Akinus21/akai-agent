@@ -71,6 +71,10 @@ pub async fn ensure_rpc_server() -> Result<PathBuf> {
     if !path.exists() {
         download_latest().await?;
     }
+    let lib_dir = crate::config::data_dir().join("lib");
+    if !lib_dir.exists() || lib_dir.read_dir().map(|mut d| d.next().is_none()).unwrap_or(true) {
+        download_latest().await?;
+    }
     Ok(path)
 }
 

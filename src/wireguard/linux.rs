@@ -35,11 +35,16 @@ pub fn configure(provision: &ProvisionResponse) -> Result<()> {
     );
 
     let iface = wg_ip.rsplitn(2, '.').last().unwrap_or("1");
-    let cfg_file = wg_dir.join(format!("wg{}.conf", iface));
+    let iface_name = format!("wg{}", iface);
+    let cfg_file = wg_dir.join(format!("{}.conf", iface_name));
     fs::write(&cfg_file, &config)?;
 
+    let _ = Command::new("wg-quick")
+        .args(["down", &iface_name])
+        .output();
+
     let output = Command::new("wg-quick")
-        .args(["up", &format!("wg{}", iface)])
+        .args(["up", &iface_name])
         .output()?;
 
     if !output.status.success() {
