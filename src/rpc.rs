@@ -145,8 +145,9 @@ pub async fn download_latest() -> Result<()> {
                 let lib_dest = lib_dir.join(&lib_name);
                 let header = entry.header();
                 if header.entry_type().is_symlink() {
-                    let link_target = entry.link_name().unwrap_or_default();
+                    if let Some(link_target) = entry.link_name() {
                     std::os::unix::fs::symlink(&link_target, &lib_dest).ok();
+                }
                 } else {
                     let mut out = std::fs::File::create(&lib_dest)?;
                     std::io::copy(&mut entry, &mut out)?;
