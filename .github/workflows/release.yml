@@ -54,8 +54,69 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
+  build-rpc-cuda:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA toolkit
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y nvidia-cuda-toolkit cmake gcc g++ git
+
+      - name: Clone llama.cpp
+        run: |
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
+
+      - name: Build rpc-server with CUDA
+        run: |
+          cd /tmp/llama.cpp
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DGGML_RPC=ON -DGGML_CUDA=ON
+          cmake --build . --config Release -j$(nproc)
+
+      - name: Bundle rpc-server + libraries
+        run: |
+          mkdir -p /tmp/rpc-bundle/lib
+          cp /tmp/llama.cpp/build/bin/rpc-server /tmp/rpc-bundle/ 2>/dev/null || true
+          cp /tmp/llama.cpp/build/bin/llama-rpc-server /tmp/rpc-bundle/ 2>/dev/null || true
+
+          for dir in /tmp/llama.cpp/build/bin /tmp/llama.cpp/build; do
+            for f in "$dir"/libggml*.so "$dir"/libggml*.so.*; do
+              [ -f "$f" ] && cp "$f" /tmp/rpc-bundle/lib/
+            done
+          done
+
+          for f in /tmp/rpc-bundle/lib/*; do
+            case "$(basename "$f")" in
+              *.so.*)
+                SOBASE=$(echo "$f" | sed 's/\(\.so\)\..*/\1/')
+                [ ! -L "$SOBASE" ] && [ -f "$SOBASE" ] && ln -sf "$(basename "$f")" "$SOBASE"
+                ;;
+            esac
+          done
+
+          echo "=== Bundle contents ==="
+          ls -la /tmp/rpc-bundle/
+          ls -la /tmp/rpc-bundle/lib/
+          echo "=== Checking CUDA dependencies ==="
+          ldd /tmp/rpc-bundle/rpc-server 2>/dev/null || ldd /tmp/rpc-bundle/llama-rpc-server 2>/dev/null || true
+
+      - name: Create archive
+        run: |
+          cd /tmp/rpc-bundle
+          FILES=""
+          [ -f rpc-server ] && FILES="$FILES rpc-server"
+          [ -f llama-rpc-server ] && FILES="$FILES llama-rpc-server"
+          tar czf /tmp/akai-agent-rpc-cuda-linux-x86_64.tar.gz $FILES lib/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: akai-agent-rpc-cuda-linux-x86_64
+          path: /tmp/akai-agent-rpc-cuda-linux-x86_64.tar.gz
+
   release:
-    needs: build
+    needs: [build, build-rpc-cuda]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -83,6 +144,7 @@ jobs:
           SHA_LIN_ARM=$(sha256sum akai-agent-linux-aarch64       | awk '{print $1}')
           SHA_MAC_ARM=$(sha256sum akai-agent-macos-aarch64       | awk '{print $1}')
           SHA_MAC_X64=$(sha256sum akai-agent-macos-x86_64        | awk '{print $1}')
+          SHA_RPC_CUDA=$(sha256sum akai-agent-rpc-cuda-linux-x86_64.tar.gz | awk '{print $1}')
 
           TAP="/tmp/homebrew-tap"
           rm -rf "$TAP"
@@ -120,9 +182,34 @@ jobs:
               end
             end
 
+            resource "rpc-cuda" do
+              url "${BASE}/akai-agent-rpc-cuda-linux-x86_64.tar.gz"
+              sha256 "${SHA_RPC_CUDA}"
+            end
+
             def install
               binary_name = stable.url.split("/").last
               bin.install binary_name => "akai-agent"
+            end
+
+            def post_install
+              if OS.linux? && Hardware::CPU.intel?
+                begin
+                  resource("rpc-cuda").stage do
+                    rpc_dest = File.expand_path("~/.local/share/akai-agent")
+                    lib_dest = File.join(rpc_dest, "lib")
+                    FileUtils.mkdir_p(lib_dest)
+                    FileUtils.cp("rpc-server", rpc_dest, preserve: true) if File.exist?("rpc-server")
+                    FileUtils.cp("llama-rpc-server", rpc_dest, preserve: true) if File.exist?("llama-rpc-server")
+                    FileUtils.cp_r("lib/.", lib_dest, preserve: true) if File.exist?("lib")
+                    chmod 0755, File.join(rpc_dest, "rpc-server") if File.exist?(File.join(rpc_dest, "rpc-server"))
+                    chmod 0755, File.join(rpc_dest, "llama-rpc-server") if File.exist?(File.join(rpc_dest, "llama-rpc-server"))
+                  end
+                rescue => e
+                  opoo "Failed to install rpc-server with CUDA: #{e}"
+                  opoo "The agent will attempt to build from source on first run."
+                end
+              end
             end
 
             def caveats
@@ -152,5 +239,5 @@ jobs:
           git config user.email "iron-bot@akinus21.com"
           git config user.name "Iron Bot"
           git add Formula/akai-agent.rb
-          git commit -m "Update akai-agent to ${TAG} (all platforms)"
+          git commit -m "Update akai-agent to ${TAG} (all platforms + rpc-cuda)"
           git push origin master

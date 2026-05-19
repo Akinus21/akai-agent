@@ -89,10 +89,16 @@ All endpoints require: `X-Worker-Key: <api_key>` header.
 Heartbeat returning 404 means the worker fell out of registry → re-register automatically.
 
 ## rpc-server Binary Management
-- Downloaded from: https://github.com/ggml-org/llama.cpp/releases/latest
-- If NVIDIA GPU detected on Linux x86_64 and build tools available: builds from source with CUDA
-- Otherwise: downloads pre-built binary from GitHub Releases
-- GitHub API: GET https://api.github.com/repos/ggml-org/llama.cpp/releases/latest
+Three-tier approach (in order of priority):
+1. **Pre-built CUDA bundle** (Linux x86_64 only): Downloaded from this repo's GitHub Release
+   `akai-agent-rpc-cuda-linux-x86_64.tar.gz` — contains rpc-server + libggml*.so with CUDA
+2. **Source build** (fallback, Linux x86_64 with NVIDIA GPU): Builds llama.cpp locally with `-DGGML_CUDA=ON`
+   - Auto-installs build tools and CUDA toolkit if missing
+   - Detects atomic/immutable distros (Silverblue) and uses Homebrew/rpm-ostree accordingly
+3. **CPU-only download** (fallback for all platforms): Downloads pre-built from llama.cpp GitHub Releases
+
+- Homebrew formula `post_install` extracts the CUDA bundle into `~/.local/share/akai-agent/`
+- GitHub APIs: `Akinus21/akai-agent` releases (CUDA bundle) + `ggml-org/llama.cpp` releases (CPU-only)
 - Always include header: `User-Agent: akai-agent/<version>`
 - Stored at: ~/.local/share/akai-agent/rpc-server (Linux/macOS)
              %LOCALAPPDATA%\akai-agent\rpc-server.exe (Windows)
@@ -111,8 +117,8 @@ Heartbeat returning 404 means the worker fell out of registry → re-register au
 | Windows x86_64 | llama-*-bin-win-cuda-cu12.2.0-x64.zip |
 
 ## CI/CD
-- `build.yml`: push to main → build linux x86_64 → GitHub Release → update Homebrew tap (linux only) → webhook
-- `release.yml`: tag push (auto from build.yml) → cross-compile 5 targets → upload all to release → full multi-platform Homebrew formula
+- `build.yml`: push to main → build linux x86_64 + build rpc-server with CUDA → GitHub Release → update Homebrew tap → webhook
+- `release.yml`: tag push (auto from build.yml) → cross-compile 5 targets + build rpc-server CUDA bundle → upload all to release → full multi-platform Homebrew formula with rpc-cuda resource
 - Webhook endpoint: `https://webhook.akinus21.com/webhook/akai-agent-build`
 - On failure: full build log sent in `errors` field of webhook payload
 - On success: tag and image info sent

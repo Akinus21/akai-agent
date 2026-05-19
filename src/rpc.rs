@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use flate2::read::GzDecoder;
 
 const GITHUB_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
+const SELF_REPO: &str = "Akinus21/akai-agent";
 const USER_AGENT: &str = concat!("akai-agent/", env!("CARGO_PKG_VERSION"));
 
 pub fn binary_name() -> &'static str {
@@ -13,8 +14,15 @@ pub fn rpc_binary_path() -> PathBuf {
     crate::config::data_dir().join(binary_name())
 }
 
-fn asset_pattern() -> &'static str {
+fn rpc_cuda_asset_name() -> Option<String> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("akai-agent-rpc-cuda-linux-x86_64.tar.gz".to_string()),
+        _ => None,
+    }
+}
+
+fn asset_pattern() -> &'static str {
+    match (std::env::consts::OS, std::env:: consts::ARCH) {
         ("linux",   "x86_64")  => "llama-*-bin-ubuntu-x64.tar.gz",
         ("linux",   "aarch64") => "llama-*-bin-ubuntu-arm64.tar.gz",
         ("macos",   "aarch64") => "llama-*-bin-macos-arm64.tar.gz",
@@ -42,15 +50,24 @@ fn glob_match(pattern: &str, name: &str) -> bool {
     true
 }
 
-async fn fetch_latest_release() -> Result<serde_json::Value> {
+async fn fetch_json(url: &str) -> Result<serde_json::Value> {
     let client = reqwest::Client::new();
-    let resp = client.get(GITHUB_API)
+    let resp = client.get(url)
         .header("User-Agent", USER_AGENT)
         .send().await?;
     if !resp.status().is_success() {
-        bail!("GitHub API returned {}", resp.status());
+        bail!("GitHub API returned {} for {}", resp.status(), url);
     }
     Ok(resp.json().await?)
+}
+
+async fn fetch_latest_release() -> Result<serde_json::Value> {
+    fetch_json(GITHUB_API).await
+}
+
+async fn fetch_self_latest_release() -> Result<serde_json::Value> {
+    let url = format!("https://api.github.com/repos/{}/releases/latest", SELF_REPO);
+    fetch_json(&url).await
 }
 
 pub async fn needs_update(current_version: &str) -> Result<bool> {
@@ -78,34 +95,142 @@ fn lib_files_valid(lib_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn has_cuda_libs() -> bool {
+    let lib_dir = crate::config::data_dir().join("lib");
+    lib_dir.join("libggml-cuda.so").exists()
+        || std::fs::read_dir(&lib_dir)
+            .ok()
+            .map(|entries| entries
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().contains("cuda")))
+            .unwrap_or(false)
+}
+
 pub async fn ensure_rpc_server() -> Result<PathBuf> {
     let path = rpc_binary_path();
     let lib_dir = crate::config::data_dir().join("lib");
     let libs_valid = lib_dir.exists() && lib_files_valid(&lib_dir);
 
     #[cfg(target_os = "linux")]
-    let needs_cuda_build = crate::build::needs_source_build()
-        && !lib_dir.join("libggml-cuda.so").exists();
+    let needs_cuda = crate::build::needs_source_build() && !has_cuda_libs();
     #[cfg(not(target_os = "linux"))]
-    let needs_cuda_build = false;
+    let needs_cuda = false;
 
-    if !path.exists() || !libs_valid || needs_cuda_build {
+    if !path.exists() || !libs_valid || needs_cuda {
         if lib_dir.exists() {
             std::fs::remove_dir_all(&lib_dir).ok();
         }
         std::fs::remove_file(&path).ok();
-        
+
         #[cfg(target_os = "linux")]
         if crate::build::needs_source_build() {
+            match download_cuda_bundle().await {
+                Ok(()) => {
+                    if path.exists() {
+                        return Ok(path);
+                    }
+                }
+                Err(e) => eprintln!("Pre-built CUDA bundle download failed: {}. Trying source build.", e),
+            }
+
             match crate::build::build_from_source() {
                 Ok(p) => return Ok(p),
-                Err(e) => eprintln!("Source build failed: {}. Falling back to download.", e),
+                Err(e) => eprintln!("Source build failed: {}. Falling back to CPU download.", e),
             }
         }
-        
+
         download_latest().await?;
     }
     Ok(path)
+}
+
+async fn download_cuda_bundle() -> Result<()> {
+    let asset_name = rpc_cuda_asset_name()
+        .ok_or_else(|| anyhow!("No pre-built CUDA bundle for this platform"))?;
+
+    let dest = rpc_binary_path();
+    let lib_dir = crate::config::data_dir().join("lib");
+
+    println!("  Looking for pre-built CUDA bundle: {}...", asset_name);
+
+    let release = fetch_self_latest_release().await?;
+    let assets = release["assets"].as_array()
+        .ok_or_else(|| anyhow!("no assets in release"))?;
+
+    let asset = assets.iter()
+        .find(|a| a["name"].as_str() == Some(&asset_name))
+        .ok_or_else(|| anyhow!("Pre-built CUDA bundle '{}' not found in latest release", asset_name))?;
+
+    let url = asset["browser_download_url"].as_str()
+        .ok_or_else(|| anyhow!("missing download URL"))?;
+
+    println!("  Downloading pre-built CUDA bundle: {}", asset_name);
+
+    let client = reqwest::Client::new();
+    let bytes = client.get(url)
+        .header("User-Agent", USER_AGENT)
+        .send().await?
+        .bytes().await?;
+
+    std::fs::create_dir_all(dest.parent().unwrap())?;
+    std::fs::create_dir_all(&lib_dir)?;
+
+    let decoder = GzDecoder::new(bytes.as_ref());
+    let mut archive = tar::Archive::new(decoder);
+
+    let mut found_binary = false;
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let name = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        let fname = std::path::Path::new(&name)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if fname == "rpc-server" || fname == "llama-rpc-server" {
+            entry.unpack(&dest)?;
+            found_binary = true;
+        }
+
+        if fname.ends_with(".so") || fname.contains(".so.") {
+            let entry_type = entry.header().entry_type();
+            if entry_type.is_symlink() {
+                if let Ok(Some(link_target)) = entry.link_name() {
+                    let link_name = link_target.to_string_lossy();
+                    let _ = std::os::unix::fs::symlink(&*link_name, lib_dir.join(&fname));
+                }
+            } else if entry_type.is_file() {
+                if let Ok(Some(link_target)) = entry.link_name() {
+                    let link_name = link_target.to_string_lossy();
+                    let _ = std::os::unix::fs::symlink(&*link_name, lib_dir.join(&fname));
+                } else {
+                    let lib_dest = lib_dir.join(&fname);
+                    let mut out = std::fs::File::create(&lib_dest)?;
+                    std::io::copy(&mut entry, &mut out)?;
+                }
+            }
+        }
+    }
+
+    if !found_binary {
+        bail!("rpc-server binary not found in CUDA bundle");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    let tag = release["tag_name"].as_str().unwrap_or("unknown");
+    if let Ok(mut cfg) = crate::config::load_config() {
+        cfg.rpc_version = format!("{}+cuda", tag);
+        cfg.rpc_binary = dest.to_string_lossy().to_string();
+        let _ = crate::config::save_config(&cfg);
+    }
+
+    println!("  Pre-built CUDA rpc-server installed ({})", tag);
+    Ok(())
 }
 
 pub async fn download_latest() -> Result<()> {

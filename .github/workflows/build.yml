@@ -53,11 +53,81 @@ jobs:
           if-no-files-found: error
           retention-days: 5
 
+  build-rpc-cuda:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA toolkit
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y nvidia-cuda-toolkit cmake gcc g++ git
+
+      - name: Clone llama.cpp
+        run: |
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
+
+      - name: Build rpc-server with CUDA
+        run: |
+          cd /tmp/llama.cpp
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DGGML_RPC=ON -DGGML_CUDA=ON
+          cmake --build . --config Release -j$(nproc)
+
+      - name: Bundle rpc-server + libraries
+        run: |
+          mkdir -p /tmp/rpc-bundle/lib
+          cp /tmp/llama.cpp/build/bin/rpc-server /tmp/rpc-bundle/ 2>/dev/null || true
+          cp /tmp/llama.cpp/build/bin/llama-rpc-server /tmp/rpc-bundle/ 2>/dev/null || true
+
+          for dir in /tmp/llama.cpp/build/bin /tmp/llama.cpp/build; do
+            for f in "$dir"/libggml*.so "$dir"/libggml*.so.*; do
+              [ -f "$f" ] && cp "$f" /tmp/rpc-bundle/lib/
+            done
+          done
+
+          for f in /tmp/rpc-bundle/lib/*; do
+            case "$(basename "$f")" in
+              *.so.*)
+                SOBASE=$(echo "$f" | sed 's/\(\.so\)\..*/\1/')
+                [ ! -L "$SOBASE" ] && [ -f "$SOBASE" ] && ln -sf "$(basename "$f")" "$SOBASE"
+                ;;
+            esac
+          done
+
+          echo "=== Bundle contents ==="
+          ls -la /tmp/rpc-bundle/
+          ls -la /tmp/rpc-bundle/lib/
+
+      - name: Create archive
+        run: |
+          cd /tmp/rpc-bundle
+          FILES=""
+          [ -f rpc-server ] && FILES="$FILES rpc-server"
+          [ -f llama-rpc-server ] && FILES="$FILES llama-rpc-server"
+          tar czf /tmp/akai-agent-rpc-cuda-linux-x86_64.tar.gz $FILES lib/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: akai-agent-rpc-cuda-linux-x86_64
+          path: /tmp/akai-agent-rpc-cuda-linux-x86_64.tar.gz
+          retention-days: 5
+
+  release:
+    needs: [build, build-rpc-cuda]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: .
+          merge-multiple: true
+
       - name: Compute new version tag
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         id: tag
         run: |
-          git fetch --tags
+          git fetch --tags 2>/dev/null || true
           PREV=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
           VER="${PREV#v}"
           MAJ=$(echo "$VER" | cut -d. -f1 | sed 's/^0*//'); MAJ=${MAJ:-0}
@@ -68,8 +138,14 @@ jobs:
           done
           echo "new_tag=v${MAJ}.${MIN}.${PAT}" >> $GITHUB_OUTPUT
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN || github.token }}
+
       - name: Update Cargo.toml version
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         run: |
           VER="${{ steps.tag.outputs.new_tag }}"; VER="${VER#v}"
           awk -F'= ' '/^\[package\]/{p=1} p && /^version/{gsub(/"[^"]+"/,"\"'"$VER"'\""); p=0} 1' \
@@ -81,7 +157,6 @@ jobs:
             git commit -m "chore: bump version to ${VER} [skip ci]"
 
       - name: Tag and create GitHub release
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         id: release
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
@@ -92,12 +167,12 @@ jobs:
           git remote set-url origin \
             "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           TAG="${{ steps.tag.outputs.new_tag }}"
-          SHA256=$(sha256sum target/release/akai-agent | awk '{print $1}')
+          SHA256=$(sha256sum akai-agent | awk '{print $1}')
           git push origin HEAD:main
           git tag -a "$TAG" -m "Release $TAG"
           git push origin "$TAG"
           gh release create "$TAG" --title "$TAG" --notes "" \
-            "target/release/akai-agent#akai-agent"
+            akai-agent akai-agent-rpc-cuda-linux-x86_64.tar.gz
           echo "sha256=$SHA256" >> $GITHUB_OUTPUT
           echo "new_tag=$TAG"   >> $GITHUB_OUTPUT
 
@@ -110,6 +185,7 @@ jobs:
           [ -z "${TAP_TOKEN:-}" ] && echo "No TAP_TOKEN; skipping" && exit 0
           TAG="${{ steps.tag.outputs.new_tag }}"
           SHA="${{ steps.release.outputs.sha256 }}"
+          SHA_RPC=$(sha256sum akai-agent-rpc-cuda-linux-x86_64.tar.gz | awk '{print $1}')
           BASE="https://github.com/Akinus21/akai-agent/releases/download/${TAG}"
           TAP="/tmp/homebrew-tap"
           rm -rf "$TAP"
@@ -128,8 +204,30 @@ jobs:
               url "${BASE}/akai-agent"
               sha256 "${SHA}"
             end
+            resource "rpc-cuda" do
+              url "${BASE}/akai-agent-rpc-cuda-linux-x86_64.tar.gz"
+              sha256 "${SHA_RPC}"
+            end
             def install
               bin.install "akai-agent" => "akai-agent"
+            end
+            def post_install
+              if OS.linux? && Hardware::CPU.intel?
+                begin
+                  resource("rpc-cuda").stage do
+                    rpc_dest = File.expand_path("~/.local/share/akai-agent")
+                    lib_dest = File.join(rpc_dest, "lib")
+                    FileUtils.mkdir_p(lib_dest)
+                    FileUtils.cp("rpc-server", rpc_dest, preserve: true) if File.exist?("rpc-server")
+                    FileUtils.cp("llama-rpc-server", rpc_dest, preserve: true) if File.exist?("llama-rpc-server")
+                    FileUtils.cp_r("lib/.", lib_dest, preserve: true) if File.exist?("lib")
+                    chmod 0755, File.join(rpc_dest, "rpc-server") if File.exist?(File.join(rpc_dest, "rpc-server"))
+                  end
+                rescue => e
+                  opoo "rpc-server with CUDA not installed: #{e}"
+                  opoo "The agent will attempt to build from source on first run."
+                end
+              end
             end
             test do
               assert_match "akai-agent", shell_output("#{bin}/akai-agent --help")
@@ -143,7 +241,7 @@ jobs:
           git push origin master
 
       - name: Notify webhook — failure
-        if: failure() && github.ref == 'refs/heads/main'
+        if: failure()
         env:
           WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
         run: |
@@ -168,10 +266,6 @@ jobs:
             "https://webhook.akinus21.com/webhook/akai-agent-build" || true
 
       - name: Notify webhook — success
-        if: >
-          success() &&
-          github.ref == 'refs/heads/main' &&
-          github.event_name != 'pull_request'
         env:
           WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
         run: |
