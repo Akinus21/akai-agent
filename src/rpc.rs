@@ -83,18 +83,31 @@ pub async fn ensure_rpc_server() -> Result<PathBuf> {
     let lib_dir = crate::config::data_dir().join("lib");
     let libs_valid = lib_dir.exists() && lib_files_valid(&lib_dir);
 
-    if !path.exists() || !libs_valid {
+    #[cfg(target_os = "linux")]
+    let needs_cuda_build = crate::build::needs_source_build()
+        && !lib_dir.join("libggml-cuda.so").exists();
+    #[cfg(not(target_os = "linux"))]
+    let needs_cuda_build = false;
+
+    if !path.exists() || !libs_valid || needs_cuda_build {
         if lib_dir.exists() {
             std::fs::remove_dir_all(&lib_dir).ok();
         }
         std::fs::remove_file(&path).ok();
         
         #[cfg(target_os = "linux")]
-        if crate::build::needs_source_build() && crate::build::has_build_tools() {
-            println!("NVIDIA GPU detected — building rpc-server from source with CUDA...");
-            match crate::build::build_from_source() {
-                Ok(p) => return Ok(p),
-                Err(e) => eprintln!("Source build failed: {}. Falling back to download.", e),
+        if crate::build::needs_source_build() {
+            if crate::build::has_build_tools() {
+                println!("NVIDIA GPU detected — building rpc-server from source with CUDA...");
+                match crate::build::build_from_source() {
+                    Ok(p) => return Ok(p),
+                    Err(e) => eprintln!("Source build failed: {}. Falling back to download.", e),
+                }
+            } else {
+                eprintln!("NVIDIA GPU detected but build tools not found.");
+                eprintln!("Install cmake and gcc for CUDA support:");
+                eprintln!("  sudo apt install cmake build-essential");
+                eprintln!("Falling back to CPU-only download.");
             }
         }
         
