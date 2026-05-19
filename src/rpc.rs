@@ -74,35 +74,32 @@ fn lib_files_valid(lib_dir: &Path) -> bool {
             return false;
         }
     };
-    let mut found_so = false;
-    let mut checked = 0;
+    let mut found_real_lib = false;
+    let mut found_broken_symlink = false;
     for entry in read_dir.filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.extension().map(|e| e.to_str() == Some("so")).unwrap_or(false) {
             continue;
         }
-        checked += 1;
         if let Ok(meta) = path.symlink_metadata() {
             if meta.file_type().is_symlink() {
                 let target = std::fs::read_link(&path);
-                let target_exists = target.map(|t| t.exists()).unwrap_or(false);
+                let target_exists = target.as_ref().map(|t| t.exists()).unwrap_or(false);
                 eprintln!("lib_files_valid: {} -> symlink, target_exists={}", path.display(), target_exists);
-                if target_exists {
-                    found_so = true;
+                if !target_exists {
+                    found_broken_symlink = true;
                 }
             } else if meta.is_file() {
                 let size = meta.len();
-                eprintln!("lib_files_valid: {} -> file, size={}", path.display(), size);
                 if size > 1024 {
-                    found_so = true;
+                    found_real_lib = true;
                 }
             }
-        } else {
-            eprintln!("lib_files_valid: symlink_metadata error for {}", path.display());
         }
     }
-    eprintln!("lib_files_valid: checked={}, found_so={}", checked, found_so);
-    found_so
+    let valid = found_real_lib && !found_broken_symlink;
+    eprintln!("lib_files_valid: found_real_lib={} found_broken_symlink={} => valid={}", found_real_lib, found_broken_symlink, valid);
+    valid
 }
 
 pub async fn ensure_rpc_server() -> Result<PathBuf> {
