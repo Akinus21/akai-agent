@@ -31,8 +31,10 @@ struct RegisterRequest<'a> {
 struct HeartbeatRequest {
     gpu:      bool,
     vram_gb:  f64,
-    rpc_port: u16,
-    alive:    bool,
+    rpc_port:  u16,
+    alive:     bool,
+    #[serde(default)]
+    models:   Vec<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -92,7 +94,7 @@ impl QueueClient {
         let resp = self.client
             .post(format!("{}/workers/register", self.base_url))
             .header(self.auth().0, self.auth().1)
-            .json(&RegisterRequest { id, name, wg_ip, wg_peer_id, gpu, vram_gb, rpc_port })
+            .json(&RegisterRequest { id, name, wg_ip, wg_peer_id, gpu, vram_gb, rpc_port, models: Vec::new() })
             .send().await?;
         if !resp.status().is_success() {
             bail!("register failed: {} — {}", resp.status(), resp.text().await?);
