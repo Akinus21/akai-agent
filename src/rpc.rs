@@ -83,52 +83,24 @@ pub fn current_version() -> String {
         .unwrap_or_default()
 }
 
-fn lib_files_valid(lib_dir: &Path) -> bool {
-    std::fs::read_dir(lib_dir)
-        .ok()
-        .map(|entries| entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().contains(".so"))
-            .any(|e| e.path().metadata()
-                .map(|m| m.is_file() && m.len() > 1024)
-                .unwrap_or(false)))
-        .unwrap_or(false)
-}
-
-fn has_cuda_libs() -> bool {
-    let lib_dir = crate::config::data_dir().join("lib");
-    lib_dir.join("libggml-cuda.so").exists()
-        || std::fs::read_dir(&lib_dir)
-            .ok()
-            .map(|entries| entries
-                .filter_map(|e| e.ok())
-                .any(|e| e.file_name().to_string_lossy().contains("cuda")))
-            .unwrap_or(false)
-}
-
 pub async fn ensure_rpc_server() -> Result<PathBuf> {
     let path = rpc_binary_path();
     let lib_dir = crate::config::data_dir().join("lib");
 
     #[cfg(target_os = "linux")]
-    let needs_cuda = crate::build::needs_source_build() && !has_cuda_libs();
+    let has_gpu = crate::build::needs_source_build();
     #[cfg(not(target_os = "linux"))]
-    let needs_cuda = false;
+    let has_gpu = false;
 
-    if path.exists() && lib_dir.exists() && lib_files_valid(&lib_dir) && !needs_cuda {
-        return Ok(path);
-    }
-
-    if lib_dir.exists() {
-        std::fs::remove_dir_all(&lib_dir).ok();
-    }
-    std::fs::remove_file(&path).ok();
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::create_dir_all(&lib_dir)?;
-
-    #[cfg(target_os = "linux")]
-    if crate::build::needs_source_build() {
+    if has_gpu {
         println!("GPU detected — building rpc-server with CUDA support...");
+        if lib_dir.exists() {
+            std::fs::remove_dir_all(&lib_dir).ok();
+        }
+        std::fs::remove_file(&path).ok();
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::create_dir_all(&lib_dir)?;
+
         match crate::build::build_from_source() {
             Ok(p) => return Ok(p),
             Err(e) => eprintln!("Source build failed: {}. Trying pre-built CUDA bundle.", e),
@@ -144,7 +116,11 @@ pub async fn ensure_rpc_server() -> Result<PathBuf> {
         }
     }
 
-    download_latest().await?;
+    if !path.exists() {
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        download_latest().await?;
+    }
+
     Ok(path)
 }
 
