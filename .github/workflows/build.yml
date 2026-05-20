@@ -84,6 +84,20 @@ jobs:
                        cuda-demo-suite-12-4 cuda-documentation-12-4; do
               sudo apt-get install -y "$pkg" 2>/dev/null || true
             done
+
+            for dir in /usr/lib/cuda-12.4 /usr/lib/cuda-12.4/targets/x86_64-linux /usr/local/cuda-12.4; do
+              [ -d "$dir" ] && echo "Found CUDA at $dir" && break
+            done
+
+            if [ ! -d "/usr/lib/cuda-12.4" ]; then
+              sudo mkdir -p /usr/lib/cuda-12.4
+              for f in /usr/bin/nvcc /usr/bin/cuda-gdb /usr/bin/cuobjdump; do
+                [ -f "$f" ] && sudo ln -sf "$f" /usr/lib/cuda-12.4/ 2>/dev/null || true
+              done
+              for f in /usr/lib/x86_64-linux-gnu/libcudart*.so*; do
+                [ -f "$f" ] && sudo ln -sf "$f" /usr/lib/cuda-12.4/ 2>/dev/null || true
+              done
+            fi
           fi
 
           sudo ldconfig
@@ -92,23 +106,51 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
 
-      - name: Build rpc-server with CUDA
+      - name: Find CUDA toolkit path
         run: |
-          find /usr -name "cuda-config.cmake" -o -name "CUDAConfig.cmake" 2>/dev/null | head -5
-          find /usr -name "cudart.*" 2>/dev/null | head -10
-          ls /usr/local/cuda-12.4/ 2>/dev/null || ls /usr/local/cuda/ 2>/dev/null || true
+          echo "=== Looking for nvcc ==="
+          which nvcc 2>/dev/null || find /usr -name "nvcc" -type f 2>/dev/null | head -5
+
+          echo "=== Looking for CUDA libs ==="
+          find /usr -name "libcudart*.so*" 2>/dev/null | head -10
+
+          echo "=== Checking common CUDA locations ==="
+          ls /usr/local/cuda*/bin/nvcc 2>/dev/null || ls /usr/lib/cuda-12.4/bin/nvcc 2>/dev/null || true
 
           CUDA_ROOT=""
+          NVCC_PATH=""
           for dir in /usr/local/cuda-12.4 /usr/local/cuda /usr/lib/cuda-12.4 /usr/lib/cuda; do
-            [ -d "$dir" ] && CUDA_ROOT="$dir" && break
+            if [ -f "$dir/bin/nvcc" ]; then
+              CUDA_ROOT="$dir"
+              NVCC_PATH="$dir/bin/nvcc"
+              break
+            fi
           done
+
+          if [ -z "$CUDA_ROOT" ]; then
+            NVCC=$(which nvcc 2>/dev/null || find /usr -name "nvcc" -type f 2>/dev/null | head -1)
+            if [ -n "$NVCC" ]; then
+              CUDA_ROOT=$(dirname $(dirname "$NVCC"))
+            fi
+          fi
+
           echo "CUDA_ROOT=$CUDA_ROOT"
+          echo "NVCC_PATH=$NVCC_PATH"
+          echo "CUDA_ROOT=$CUDA_ROOT" >> $GITHUB_ENV
+          echo "NVCC_PATH=$NVCC_PATH" >> $GITHUB_ENV
+
+      - name: Build rpc-server with CUDA
+        run: |
+          echo "CUDA_ROOT from env: $CUDA_ROOT"
+          echo "NVCC_PATH from env: $NVCC_PATH"
+          ls "$CUDA_ROOT/bin/" 2>/dev/null | head -10 || echo "bin/ not found"
+          "$CUDA_ROOT/bin/nvcc" --version 2>/dev/null || echo "nvcc not found"
 
           cd /tmp/llama.cpp
           mkdir build && cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release -DGGML_RPC=ON -DGGML_CUDA=ON \
-            -DCUDAToolkit_ROOT="${CUDA_ROOT:-/usr/local/cuda-12.4}" \
-            -DCMAKE_CUDA_COMPILER="${CUDA_ROOT:-/usr/local/cuda-12.4}/bin/nvcc"
+            -DCUDAToolkit_ROOT="$CUDA_ROOT" \
+            -DCMAKE_CUDA_COMPILER="${NVCC_PATH:-$CUDA_ROOT/bin/nvcc}"
           cmake --build . --config Release -j$(nproc)
 
       - name: Bundle rpc-server + libraries
