@@ -149,7 +149,7 @@ jobs:
           echo "=== Bundling CUDA runtime libraries ==="
           ldd /tmp/rpc-bundle/rpc-server 2>/dev/null | grep -E 'cuda|cublas|cufft|curand|cusparse|cusolver|nvrtc|cublasLt|cudart' | awk '{print $1}' | while read lib; do
             found=false
-            for search_dir in /usr/local/cuda/lib64 /usr/local/cuda/lib64 /usr/lib/x86_64-linux-gnu /usr/lib64 /lib/x86_64-linux-gnu; do
+            for search_dir in /usr/local/cuda/lib64 /usr/local/cuda-12.5/lib64 /usr/lib/x86_64-linux-gnu /usr/lib64 /lib/x86_64-linux-gnu; do
               if [ -f "$search_dir/$lib" ]; then
                 cp -L "$search_dir/$lib" /tmp/rpc-bundle/lib/
                 found=true
@@ -157,10 +157,23 @@ jobs:
               fi
             done
             if [ "$found" = false ]; then
-              locate "$lib" 2>/dev/null | head -1 | xargs -I{} cp -L "{}" /tmp/rpc-bundle/lib/ 2>/dev/null || true
               find / -name "$lib" -type f 2>/dev/null | head -1 | xargs -I{} cp -L "{}" /tmp/rpc-bundle/lib/ 2>/dev/null || true
             fi
           done
+
+          echo "=== Bundling cuda-compat for driver compatibility ==="
+          for compat_lib in /usr/lib/x86_64-linux-gnu/libcuda.so* /usr/lib/x86_64-linux-gnu/libnvidia.so* \
+                            /usr/local/cuda/compat/libcuda.so* /usr/local/cuda-12.5/compat/libcuda.so*; do
+            if [ -f "$compat_lib" ]; then
+              cp -L "$compat_lib" /tmp/rpc-bundle/lib/ 2>/dev/null || true
+            fi
+          done
+
+          if [ -d "/usr/lib/x86_64-linux-gnu" ]; then
+            for f in /usr/lib/x86_64-linux-gnu/libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so; do
+              [ -f "$f" ] && cp -L "$f" /tmp/rpc-bundle/lib/ 2>/dev/null || true
+            done
+          fi
 
           for f in /tmp/rpc-bundle/lib/*; do
             case "$(basename "$f")" in
