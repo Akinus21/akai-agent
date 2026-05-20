@@ -322,7 +322,7 @@ fn ensure_akai_container() -> Result<String> {
     }
 
     println!("  Installing build tools in container...");
-    let install_cmd = "apt-get update -qq && apt-get install -y cmake gcc g++ git wget curl";
+    let install_cmd = "sudo apt-get update -qq && sudo apt-get install -y cmake gcc g++ git wget curl";
     let enter_args: Vec<String> = vec!["enter".into(), container_name.into(), "--".into(), "sh".into(), "-c".into(), install_cmd.into()];
     let status = run_distrobox(&enter_args)?;
     if !status.success() {
@@ -346,29 +346,29 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
 
     println!("  Installing CUDA toolkit {} in container...", cuda_pkg);
     let cuda_install_cmd = format!(
-        "apt-get update -qq && \
+        "sudo apt-get update -qq && \
          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && \
-         dpkg -i /tmp/cuda-keyring.deb && \
-         apt-get update -qq && \
-         apt-get install -y {pkg} && \
-         ldconfig",
+         sudo dpkg -i /tmp/cuda-keyring.deb && \
+         sudo apt-get update -qq && \
+         sudo apt-get install -y {pkg} && \
+         sudo ldconfig",
         pkg = cuda_pkg
     );
     let status = run_distrobox(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), cuda_install_cmd])?;
     if !status.success() {
         println!("  CUDA toolkit install failed, trying individual packages...");
         let fallback = format!(
-            "apt-get update -qq && \
+            "sudo apt-get update -qq && \
              wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && \
-             dpkg -i /tmp/cuda-keyring.deb && \
-             apt-get update -qq && \
-             apt-get install -y --fix-broken && \
+             sudo dpkg -i /tmp/cuda-keyring.deb && \
+             sudo apt-get update -qq && \
+             sudo apt-get install -y --fix-broken && \
              for pkg in cuda-nvcc-{maj}-{min} cuda-cudart-{maj}-{min} cuda-cudart-dev-{maj}-{min} \
                         cuda-cccl-{maj}-{min} cuda-cupti-{maj}-{min} \
                         libcublas-dev-{maj}-{min} libcublas-{maj}-{min}; do \
-               apt-get install -y $pkg 2>/dev/null || true; \
+               sudo apt-get install -y $pkg 2>/dev/null || true; \
              done && \
-             ldconfig",
+             sudo ldconfig",
             maj = cuda_major, min = cuda_minor
         );
         let status = run_distrobox(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), fallback])?;
