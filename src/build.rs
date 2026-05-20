@@ -220,45 +220,94 @@ fn ensure_distrobox() -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn is_root() -> bool {
-    unsafe { libc::geteuid() == 0 }
+fn sudo_user() -> Option<String> {
+    std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty())
 }
 
-#[cfg(not(unix))]
-fn is_root() -> bool {
-    false
+fn sudo_user_home() -> Option<PathBuf> {
+    sudo_user().and_then(|u| {
+        let output = Command::new("getent")
+            .args(["passwd", &u])
+            .output()
+            .ok()?;
+        let line = String::from_utf8_lossy(&output.stdout);
+        let home = line.split(':').nth(5)?;
+        if home.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(home))
+        }
+    })
 }
 
-fn distrobox_create_args() -> Vec<String> {
-    let mut args = vec!["create".to_string()];
-    if is_root() {
-        args.push("--root".to_string());
+fn effective_data_dir() -> PathBuf {
+    if let Some(home) = sudo_user_home() {
+        home.join(".local").join("share").join("akai-agent")
+    } else {
+        data_dir()
     }
-    args
 }
 
-fn distrobox_enter_args(container: &str) -> Vec<String> {
-    let mut args = vec!["enter".to_string(), container.to_string()];
-    if is_root() {
-        args.push("--root".to_string());
+fn effective_source_dir() -> PathBuf {
+    effective_data_dir().join("src").join("llama.cpp")
+}
+
+fn run_distrobox(args: &[String]) -> Result<std::process::ExitStatus> {
+    let path = path_with_homebrew();
+    if let Some(user) = sudo_user() {
+        let sudo_args: Vec<String> = vec![
+            "-u".into(),
+            user.clone(),
+            "distrobox".into(),
+        ];
+        let mut cmd = Command::new("sudo");
+        cmd.args(&sudo_args)
+            .args(args)
+            .env("PATH", &path);
+        if let Some(home) = sudo_user_home() {
+            cmd.env("HOME", home.to_string_lossy().to_string());
+        }
+        cmd.status().context("Failed to run distrobox command via sudo")
+    } else {
+        Command::new("distrobox")
+            .args(args)
+            .env("PATH", &path)
+            .status()
+            .context("Failed to run distrobox command")
     }
-    args
+}
+
+fn run_distrobox_output(args: &[String]) -> Result<std::process::Output> {
+    let path = path_with_homebrew();
+    if let Some(user) = sudo_user() {
+        let sudo_args: Vec<String> = vec![
+            "-u".into(),
+            user.clone(),
+            "distrobox".into(),
+        ];
+        let mut cmd = Command::new("sudo");
+        cmd.args(&sudo_args)
+            .args(args)
+            .env("PATH", &path);
+        if let Some(home) = sudo_user_home() {
+            cmd.env("HOME", home.to_string_lossy().to_string());
+        }
+        cmd.output().context("Failed to run distrobox command via sudo")
+    } else {
+        Command::new("distrobox")
+            .args(args)
+            .env("PATH", &path)
+            .output()
+            .context("Failed to run distrobox command")
+    }
 }
 
 fn ensure_akai_container() -> Result<String> {
     ensure_distrobox()?;
     let container_name = "akai";
 
-    let mut list_args = vec!["list".to_string()];
-    if is_root() {
-        list_args.push("--root".to_string());
-    }
-    let output = Command::new("distrobox")
-        .args(&list_args)
-        .env("PATH", path_with_homebrew())
-        .output()
-        .context("Failed to list distrobox containers")?;
+    let list_args: Vec<String> = vec!["list".into(), "--no-header".into()];
+    let output = run_distrobox_output(&list_args)?;
     let listing = String::from_utf8_lossy(&output.stdout);
     if listing.lines().any(|l| l.contains(container_name)) {
         println!("  Distrobox container '{}' already exists", container_name);
@@ -266,26 +315,16 @@ fn ensure_akai_container() -> Result<String> {
     }
 
     println!("  Creating distrobox container '{}'...", container_name);
-    let mut create_args = distrobox_create_args();
-    create_args.extend_from_slice(&["--name".to_string(), container_name, "--image".to_string(), "ubuntu:24.04".to_string(), "--yes".to_string()]);
-    let status = Command::new("distrobox")
-        .args(&create_args)
-        .env("PATH", path_with_homebrew())
-        .status()
-        .context("Failed to create distrobox container")?;
+    let create_args: Vec<String> = vec!["create".into(), "--name".into(), container_name.into(), "--image".into(), "ubuntu:24.04".into(), "--yes".into()];
+    let status = run_distrobox(&create_args)?;
     if !status.success() {
         bail!("Failed to create distrobox container '{}'. Try running without sudo or install distrobox first.", container_name);
     }
 
     println!("  Installing build tools in container...");
-    let mut enter_args = distrobox_enter_args(container_name);
     let install_cmd = "apt-get update -qq && apt-get install -y cmake gcc g++ git wget curl";
-    enter_args.extend_from_slice(&["--".to_string(), "sh".to_string(), "-c".to_string(), install_cmd.to_string()]);
-    let status = Command::new("distrobox")
-        .args(&enter_args)
-        .env("PATH", path_with_homebrew())
-        .status()
-        .context("Failed to install build tools in container")?;
+    let enter_args: Vec<String> = vec!["enter".into(), container_name.into(), "--".into(), "sh".into(), "-c".into(), install_cmd.into()];
+    let status = run_distrobox(&enter_args)?;
     if !status.success() {
         bail!("Failed to install build tools in container");
     }
@@ -295,7 +334,9 @@ fn ensure_akai_container() -> Result<String> {
 pub fn build_in_distrobox() -> Result<PathBuf> {
     let container = ensure_akai_container()?;
     let bin = crate::rpc::rpc_binary_path();
-    let lib_dir = data_dir().join("lib");
+    let eff_data = effective_data_dir();
+    let eff_src = effective_source_dir();
+    let lib_dir = eff_data.join("lib");
 
     let driver_ver = nvidia_driver_version().unwrap_or_default();
     let (cuda_major, cuda_minor) = cuda_version_for_driver(&driver_ver);
@@ -313,13 +354,7 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
          ldconfig",
         pkg = cuda_pkg
     );
-    let mut enter_args = distrobox_enter_args(&container);
-    enter_args.extend_from_slice(&["--".to_string(), "sh".to_string(), "-c".to_string(), cuda_install_cmd]);
-    let status = Command::new("distrobox")
-        .args(&enter_args)
-        .env("PATH", path_with_homebrew())
-        .status()
-        .context("Failed to install CUDA toolkit in container")?;
+    let status = run_distrobox(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), cuda_install_cmd])?;
     if !status.success() {
         println!("  CUDA toolkit install failed, trying individual packages...");
         let fallback = format!(
@@ -336,25 +371,13 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
              ldconfig",
             maj = cuda_major, min = cuda_minor
         );
-        let mut enter_args = distrobox_enter_args(&container);
-        enter_args.extend_from_slice(&["--".to_string(), "sh".to_string(), "-c".to_string(), fallback]);
-        let status = Command::new("distrobox")
-            .args(&enter_args)
-            .env("PATH", path_with_homebrew())
-            .status()
-            .context("Failed to install CUDA packages in container")?;
+        let status = run_distrobox(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), fallback])?;
         if !status.success() {
             eprintln!("  CUDA installation failed. Building CPU-only.");
         }
     }
 
-    let mut enter_args = distrobox_enter_args(&container);
-    enter_args.extend_from_slice(&["--".to_string(), "sh".to_string(), "-c".to_string(), "which nvcc 2>/dev/null || echo ''".to_string()]);
-    let has_nvcc_out = Command::new("distrobox")
-        .args(&enter_args)
-        .env("PATH", path_with_homebrew())
-        .output()
-        .context("Failed to check for nvcc")?;
+    let has_nvcc_out = run_distrobox_output(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), "which nvcc 2>/dev/null || echo ''".into()])?;
     let has_nvcc = !String::from_utf8_lossy(&has_nvcc_out.stdout).trim().is_empty();
 
     let cmake_args = if has_nvcc {
@@ -365,8 +388,8 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
 
     println!("  Building rpc-server in distrobox (CUDA: {})...", has_nvcc);
 
-    let llama_src = format!("{}", source_dir().to_string_lossy());
-    let data_path = format!("{}", data_dir().to_string_lossy());
+    let llama_src = format!("{}", eff_src.to_string_lossy());
+    let data_path = format!("{}", eff_data.to_string_lossy());
     std::fs::create_dir_all(&lib_dir)?;
 
     let build_cmd = format!(
@@ -391,22 +414,35 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
         data = data_path
     );
 
-    let mut enter_args = distrobox_enter_args(&container);
-    enter_args.extend_from_slice(&["--".to_string(), "sh".to_string(), "-c".to_string(), build_cmd]);
-    let status = Command::new("distrobox")
-        .args(&enter_args)
-        .env("PATH", path_with_homebrew())
-        .status()
-        .context("Failed to build in distrobox")?;
+    let status = run_distrobox(&vec!["enter".into(), container, "--".into(), "sh".into(), "-c".into(), build_cmd])?;
     if !status.success() {
         bail!("Build failed in distrobox");
     }
 
-    let built_bin = data_dir().join("rpc-server");
-    if !built_bin.exists() {
-        bail!("Built binary not found at {}", built_bin.display());
+    let eff_bin = eff_data.join("rpc-server");
+    if !eff_bin.exists() {
+        bail!("Built binary not found at {}", eff_bin.display());
     }
-    std::fs::copy(&built_bin, &bin)?;
+
+    if eff_data != data_dir() {
+        std::fs::create_dir_all(&data_dir())?;
+        let target = data_dir().join("rpc-server");
+        std::fs::copy(&eff_bin, &target)?;
+        let eff_lib = eff_data.join("lib");
+        let target_lib = data_dir().join("lib");
+        std::fs::create_dir_all(&target_lib)?;
+        if eff_lib.exists() {
+            for entry in std::fs::read_dir(&eff_lib)? {
+                let entry = entry?;
+                if entry.file_name().to_string_lossy().contains(".so") {
+                    std::fs::copy(entry.path(), target_lib.join(entry.file_name()))?;
+                }
+            }
+        }
+        std::fs::copy(&eff_bin, &bin)?;
+    } else {
+        std::fs::copy(&eff_bin, &bin)?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
