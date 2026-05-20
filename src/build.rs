@@ -459,6 +459,11 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
            for f in \"$dir\"/libggml*.so \"$dir\"/libggml*.so.*; do \
              [ -f \"$f\" ] && cp \"$f\" '{data}/lib/' 2>/dev/null || true; \
            done; \
+         done && \
+         for dir in /usr/local/cuda-{maj}.{min}/lib64 /usr/local/cuda/lib64 /usr/lib/x86_64-linux-gnu; do \
+           for f in \"$dir\"/libcudart.so* \"$dir\"/libcublasLt.so* \"$dir\"/libcublas.so* \"$dir\"/libcurand.so*; do \
+             [ -f \"$f\" ] && cp -L \"$f\" '{data}/lib/' 2>/dev/null || true; \
+           done; \
          done",
         maj = cuda_major, min = cuda_minor,
         src = llama_src,
