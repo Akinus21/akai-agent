@@ -336,7 +336,6 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
     let bin = crate::rpc::rpc_binary_path();
     let eff_data = effective_data_dir();
     let eff_src = effective_source_dir();
-    let lib_dir = eff_data.join("lib");
 
     let driver_ver = nvidia_driver_version().unwrap_or_default();
     let (cuda_major, cuda_minor) = cuda_version_for_driver(&driver_ver);
@@ -377,7 +376,7 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
         }
     }
 
-    let has_nvcc_out = run_distrobox_output(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), "which nvcc 2>/dev/null || echo ''".into()])?;
+    let has_nvcc_out = run_distrobox_output(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), "ls /usr/local/cuda*/bin/nvcc 2>/dev/null || which nvcc 2>/dev/null || echo ''".into()])?;
     let has_nvcc = !String::from_utf8_lossy(&has_nvcc_out.stdout).trim().is_empty();
 
     let cmake_args = if has_nvcc {
@@ -390,10 +389,16 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
 
     let llama_src = format!("{}", eff_src.to_string_lossy());
     let data_path = format!("{}", eff_data.to_string_lossy());
-    std::fs::create_dir_all(&lib_dir)?;
+
+    let mkdir_cmd = format!("mkdir -p '{data}/lib' '{src}'", data = data_path, src = llama_src);
+    let status = run_distrobox(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), mkdir_cmd])?;
+    if !status.success() {
+        bail!("Failed to create build directories in container");
+    }
 
     let build_cmd = format!(
-        "if [ ! -d '{src}/.git' ]; then \
+        "export PATH=/usr/local/cuda-{maj}.{min}/bin:$PATH && \
+         if [ ! -d '{src}/.git' ]; then \
            git clone --depth 1 {repo} '{src}'; \
          fi && \
          mkdir -p '{src}/build' && \
@@ -408,6 +413,7 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
              [ -f \"$f\" ] && cp \"$f\" '{data}/lib/' 2>/dev/null || true; \
            done; \
          done",
+        maj = cuda_major, min = cuda_minor,
         src = llama_src,
         repo = LLAMA_CPP_REPO,
         cmake_args = cmake_args,
