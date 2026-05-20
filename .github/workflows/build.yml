@@ -59,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install CUDA toolkit 12.4
+      - name: Install CUDA toolkit 12.5
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y cmake gcc g++ git wget
@@ -69,35 +69,16 @@ jobs:
           sudo dpkg -i /tmp/cuda-keyring.deb
           sudo apt-get update -qq
 
-          CUDA_DEB="cuda-toolkit-12-4_12.4.0-1_amd64.deb"
-          wget -q "$CUDA_REPO_URL/$CUDA_DEB" -O /tmp/cuda-toolkit.deb || true
-          if [ -f /tmp/cuda-toolkit.deb ]; then
-            sudo dpkg -i /tmp/cuda-toolkit.deb || true
-          fi
-
-          if ! dpkg -l cuda-toolkit-12-4 2>/dev/null | grep -q "^ii"; then
+          sudo apt-get install -y cuda-toolkit-12-5 || true
+          if ! dpkg -l cuda-toolkit-12-5 2>/dev/null | grep -q "^ii"; then
             sudo apt-get install -y --fix-broken || true
-            for pkg in cuda-cccl-12-4 cuda-command-line-tools-12-4 cuda-cudart-12-4 cuda-cudart-dev-12-4 \
-                       cuda-cupti-12-4 cuda-cupti-dev-12-4 cuda-cuxxfilt-12-4 cuda-cuobjdump-12-4 \
-                       cuda-nvcc-12-4 cuda-nvcc-dev-12-4 cuda-nvprof-12-4 cuda-nvdisasm-12-4 \
-                       cuda-gdb-12-4 cuda-nsight-12-4 cuda-nsight-compute-12-4 cuda-nsight-systems-12-4 \
-                       cuda-demo-suite-12-4 cuda-documentation-12-4; do
+            for pkg in cuda-cccl-12-5 cuda-command-line-tools-12-5 cuda-cudart-12-5 cuda-cudart-dev-12-5 \
+                       cuda-cupti-12-5 cuda-cupti-dev-12-5 cuda-cuxxfilt-12-5 cuda-cuobjdump-12-5 \
+                       cuda-nvcc-12-5 cuda-nvcc-dev-12-5 cuda-nvprof-12-5 cuda-nvdisasm-12-5 \
+                       cuda-gdb-12-5 cuda-nsight-12-5 cuda-nsight-compute-12-5 cuda-nsight-systems-12-5 \
+                       cuda-demo-suite-12-5 cuda-documentation-12-5; do
               sudo apt-get install -y "$pkg" 2>/dev/null || true
             done
-
-            for dir in /usr/lib/cuda-12.4 /usr/lib/cuda-12.4/targets/x86_64-linux /usr/local/cuda-12.4; do
-              [ -d "$dir" ] && echo "Found CUDA at $dir" && break
-            done
-
-            if [ ! -d "/usr/lib/cuda-12.4" ]; then
-              sudo mkdir -p /usr/lib/cuda-12.4
-              for f in /usr/bin/nvcc /usr/bin/cuda-gdb /usr/bin/cuobjdump; do
-                [ -f "$f" ] && sudo ln -sf "$f" /usr/lib/cuda-12.4/ 2>/dev/null || true
-              done
-              for f in /usr/lib/x86_64-linux-gnu/libcudart*.so*; do
-                [ -f "$f" ] && sudo ln -sf "$f" /usr/lib/cuda-12.4/ 2>/dev/null || true
-              done
-            fi
           fi
 
           sudo ldconfig
@@ -115,11 +96,11 @@ jobs:
           find /usr -name "libcudart*.so*" 2>/dev/null | head -10
 
           echo "=== Checking common CUDA locations ==="
-          ls /usr/local/cuda*/bin/nvcc 2>/dev/null || ls /usr/lib/cuda-12.4/bin/nvcc 2>/dev/null || true
+          ls /usr/local/cuda*/bin/nvcc 2>/dev/null || ls /usr/lib/cuda-12.5/bin/nvcc 2>/dev/null || true
 
           CUDA_ROOT=""
           NVCC_PATH=""
-          for dir in /usr/local/cuda-12.4 /usr/local/cuda /usr/lib/cuda-12.4 /usr/lib/cuda; do
+          for dir in /usr/local/cuda-12.5 /usr/local/cuda /usr/lib/cuda-12.5 /usr/lib/cuda; do
             if [ -f "$dir/bin/nvcc" ]; then
               CUDA_ROOT="$dir"
               NVCC_PATH="$dir/bin/nvcc"
