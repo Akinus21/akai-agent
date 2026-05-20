@@ -146,6 +146,36 @@ fn nvidia_driver_version() -> Option<String> {
     Some(version)
 }
 
+fn nvidia_gpu_compute_cap() -> &'static str {
+    let output = match Command::new("nvidia-smi")
+        .args(["--query-gpu=name", "--format=csv,noheader"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return "75",
+    };
+    let name = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    if name.contains("rtx 5090") || name.contains("rtx 5080") || name.contains("rtx 5070") {
+        "120"
+    } else if name.contains("rtx 4090") || name.contains("rtx 4080") || name.contains("rtx 4070") || name.contains("rtx 4060") {
+        "89"
+    } else if name.contains("rtx 3090") || name.contains("rtx 3080") || name.contains("rtx 3070") || name.contains("rtx 3060") {
+        "86"
+    } else if name.contains("rtx 2080") || name.contains("rtx 2070") || name.contains("rtx 2060") {
+        "75"
+    } else if name.contains("gtx 1080") || name.contains("gtx 1070") || name.contains("gtx 1060") {
+        "61"
+    } else if name.contains("a100") || name.contains("a10") || name.contains("a30") {
+        "80"
+    } else if name.contains("h100") || name.contains("h200") {
+        "90"
+    } else if name.contains("l40") || name.contains("l4") {
+        "89"
+    } else {
+        "75"
+    }
+}
+
 fn cuda_version_for_driver(driver_version: &str) -> (u32, u32) {
     let major: u32 = driver_version.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(550);
     if major >= 580 {
@@ -379,10 +409,11 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
     let has_nvcc_out = run_distrobox_output(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), "ls /usr/local/cuda*/bin/nvcc 2>/dev/null || which nvcc 2>/dev/null || echo ''".into()])?;
     let has_nvcc = !String::from_utf8_lossy(&has_nvcc_out.stdout).trim().is_empty();
 
+    let arch = nvidia_gpu_compute_cap();
     let cmake_args = if has_nvcc {
-        "-DGGML_CUDA=ON -DGGML_RPC=ON"
+        format!("-DGGML_CUDA=ON -DGGML_RPC=ON -DCMAKE_CUDA_ARCHITECTURES={}", arch)
     } else {
-        "-DGGML_RPC=ON"
+        "-DGGML_RPC=ON".to_string()
     };
 
     println!("  Building rpc-server in distrobox (CUDA: {})...", has_nvcc);
@@ -411,6 +442,14 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
          fi && \
          mkdir -p '{src}/build' && \
          cd '{src}/build' && \
+         for libdir in /run/host/usr/lib/x86_64-linux-gnu /run/host/usr/lib64 /run/host/lib/x86_64-linux-gnu /run/host/lib64 /usr/lib/x86_64-linux-gnu; do \
+           if [ -f \"$libdir/libcuda.so.1\" ]; then \
+             sudo ln -sf \"$libdir/libcuda.so.1\" /usr/local/lib/libcuda.so.1 2>/dev/null; \
+             sudo ln -sf \"$libdir/libcuda.so.1\" /usr/local/lib/libcuda.so 2>/dev/null; \
+             break; \
+           fi; \
+         done && \
+         sudo ldconfig 2>/dev/null; \
          cmake .. -DCMAKE_BUILD_TYPE=Release {cmake_args} && \
          cmake --build . --config Release -j$(nproc) && \
          cp '{src}/build/bin/rpc-server' '{data}/rpc-server' 2>/dev/null || \
