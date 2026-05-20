@@ -220,11 +220,42 @@ fn ensure_distrobox() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn is_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_root() -> bool {
+    false
+}
+
+fn distrobox_create_args() -> Vec<String> {
+    let mut args = vec!["create".to_string()];
+    if is_root() {
+        args.push("--root".to_string());
+    }
+    args
+}
+
+fn distrobox_enter_args(container: &str) -> Vec<String> {
+    let mut args = vec!["enter".to_string(), container.to_string()];
+    if is_root() {
+        args.push("--root".to_string());
+    }
+    args
+}
+
 fn ensure_akai_container() -> Result<String> {
     ensure_distrobox()?;
     let container_name = "akai";
+
+    let mut list_args = vec!["list".to_string()];
+    if is_root() {
+        list_args.push("--root".to_string());
+    }
     let output = Command::new("distrobox")
-        .args(["list", "--no-header"])
+        .args(&list_args)
         .env("PATH", path_with_homebrew())
         .output()
         .context("Failed to list distrobox containers")?;
@@ -233,24 +264,25 @@ fn ensure_akai_container() -> Result<String> {
         println!("  Distrobox container '{}' already exists", container_name);
         return Ok(container_name.to_string());
     }
+
     println!("  Creating distrobox container '{}'...", container_name);
-    let distro = if detect_distro() == "silverblue" || detect_distro() == "bluefin" {
-        "ubuntu:24.04"
-    } else {
-        "ubuntu:24.04"
-    };
+    let mut create_args = distrobox_create_args();
+    create_args.extend_from_slice(&["--name".to_string(), container_name, "--image".to_string(), "ubuntu:24.04".to_string(), "--yes".to_string()]);
     let status = Command::new("distrobox")
-        .args(["create", "--name", container_name, "--image", distro, "--yes"])
+        .args(&create_args)
         .env("PATH", path_with_homebrew())
         .status()
         .context("Failed to create distrobox container")?;
     if !status.success() {
-        bail!("Failed to create distrobox container '{}'", container_name);
+        bail!("Failed to create distrobox container '{}'. Try running without sudo or install distrobox first.", container_name);
     }
+
     println!("  Installing build tools in container...");
+    let mut enter_args = distrobox_enter_args(container_name);
+    let install_cmd = "apt-get update -qq && apt-get install -y cmake gcc g++ git wget curl";
+    enter_args.extend_from_slice(&["--".to_string(), "sh".to_string(), "-c".to_string(), install_cmd.to_string()]);
     let status = Command::new("distrobox")
-        .args(["enter", container_name, "--", "sh", "-c",
-            "apt-get update -qq && apt-get install -y cmake gcc g++ git wget curl"])
+        .args(&enter_args)
         .env("PATH", path_with_homebrew())
         .status()
         .context("Failed to install build tools in container")?;
@@ -281,8 +313,10 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
          ldconfig",
         pkg = cuda_pkg
     );
+    let mut enter_args = distrobox_enter_args(&container);
+    enter_args.extend_from_slice(&["--".to_string(), "sh".to_string(), "-c".to_string(), cuda_install_cmd]);
     let status = Command::new("distrobox")
-        .args(["enter", &container, "--", "sh", "-c", &cuda_install_cmd])
+        .args(&enter_args)
         .env("PATH", path_with_homebrew())
         .status()
         .context("Failed to install CUDA toolkit in container")?;
@@ -302,8 +336,10 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
              ldconfig",
             maj = cuda_major, min = cuda_minor
         );
+        let mut enter_args = distrobox_enter_args(&container);
+        enter_args.extend_from_slice(&["--".to_string(), "sh".to_string(), "-c".to_string(), fallback]);
         let status = Command::new("distrobox")
-            .args(["enter", &container, "--", "sh", "-c", &fallback])
+            .args(&enter_args)
             .env("PATH", path_with_homebrew())
             .status()
             .context("Failed to install CUDA packages in container")?;
@@ -312,8 +348,10 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
         }
     }
 
+    let mut enter_args = distrobox_enter_args(&container);
+    enter_args.extend_from_slice(&["--".to_string(), "sh".to_string(), "-c".to_string(), "which nvcc 2>/dev/null || echo ''".to_string()]);
     let has_nvcc_out = Command::new("distrobox")
-        .args(["enter", &container, "--", "sh", "-c", "which nvcc 2>/dev/null || echo ''"])
+        .args(&enter_args)
         .env("PATH", path_with_homebrew())
         .output()
         .context("Failed to check for nvcc")?;
@@ -353,8 +391,10 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
         data = data_path
     );
 
+    let mut enter_args = distrobox_enter_args(&container);
+    enter_args.extend_from_slice(&["--".to_string(), "sh".to_string(), "-c".to_string(), build_cmd]);
     let status = Command::new("distrobox")
-        .args(["enter", &container, "--", "sh", "-c", &build_cmd])
+        .args(&enter_args)
         .env("PATH", path_with_homebrew())
         .status()
         .context("Failed to build in distrobox")?;
@@ -565,11 +605,9 @@ pub fn install_build_tools() -> Result<()> {
 }
 
 pub fn build_from_source() -> Result<PathBuf> {
-    if (is_ostree() || is_container()) && !is_container() {
-        if is_ostree() && !is_container() {
-            println!("  Atomic/immutable distro detected. Using distrobox for build...");
-            return build_in_distrobox();
-        }
+    if is_ostree() && !is_container() {
+        println!("  Atomic/immutable distro detected. Using distrobox for build...");
+        return build_in_distrobox();
     }
 
     let src = source_dir();
