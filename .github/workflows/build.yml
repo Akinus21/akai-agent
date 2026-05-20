@@ -53,183 +53,8 @@ jobs:
           if-no-files-found: error
           retention-days: 5
 
-  build-rpc-cuda:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install CUDA toolkit 12.6
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y cmake gcc g++ git wget
-
-          CUDA_REPO_URL="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64"
-          wget -q "$CUDA_REPO_URL/cuda-keyring_1.1-1_all.deb" -O /tmp/cuda-keyring.deb
-          sudo dpkg -i /tmp/cuda-keyring.deb
-          sudo apt-get update -qq
-
-          sudo apt-get install -y cuda-toolkit-12-6 || true
-          if ! dpkg -l cuda-toolkit-12-6 2>/dev/null | grep -q "^ii"; then
-            sudo apt-get install -y --fix-broken || true
-            for pkg in cuda-cccl-12-6 cuda-command-line-tools-12-6 cuda-cudart-12-6 cuda-cudart-dev-12-6 \
-                       cuda-cupti-12-6 cuda-cupti-dev-12-6 cuda-cuxxfilt-12-6 cuda-cuobjdump-12-6 \
-                       cuda-nvcc-12-6 cuda-nvcc-dev-12-6 cuda-nvprof-12-6 cuda-nvdisasm-12-6 \
-                       cuda-gdb-12-6 cuda-nsight-12-6 cuda-nsight-compute-12-6 cuda-nsight-systems-12-6 \
-                       cuda-demo-suite-12-6 cuda-documentation-12-6; do
-              sudo apt-get install -y "$pkg" 2>/dev/null || true
-            done
-          fi
-
-          sudo ldconfig
-
-      - name: Clone llama.cpp
-        run: |
-          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
-
-      - name: Find CUDA toolkit path
-        run: |
-          echo "=== Looking for nvcc ==="
-          which nvcc 2>/dev/null || find /usr -name "nvcc" -type f 2>/dev/null | head -5
-
-          echo "=== Looking for CUDA libs ==="
-          find /usr -name "libcudart*.so*" 2>/dev/null | head -10
-
-          echo "=== Checking common CUDA locations ==="
-          ls /usr/local/cuda*/bin/nvcc 2>/dev/null || ls /usr/lib/cuda-12.6/bin/nvcc 2>/dev/null || true
-
-          CUDA_ROOT=""
-          NVCC_PATH=""
-          for dir in /usr/local/cuda-12.6 /usr/local/cuda /usr/lib/cuda-12.6 /usr/lib/cuda; do
-            if [ -f "$dir/bin/nvcc" ]; then
-              CUDA_ROOT="$dir"
-              NVCC_PATH="$dir/bin/nvcc"
-              break
-            fi
-          done
-
-          if [ -z "$CUDA_ROOT" ]; then
-            NVCC=$(which nvcc 2>/dev/null || find /usr -name "nvcc" -type f 2>/dev/null | head -1)
-            if [ -n "$NVCC" ]; then
-              CUDA_ROOT=$(dirname $(dirname "$NVCC"))
-            fi
-          fi
-
-          echo "CUDA_ROOT=$CUDA_ROOT"
-          echo "NVCC_PATH=$NVCC_PATH"
-          echo "CUDA_ROOT=$CUDA_ROOT" >> $GITHUB_ENV
-          echo "NVCC_PATH=$NVCC_PATH" >> $GITHUB_ENV
-
-      - name: Build rpc-server with CUDA
-        run: |
-          echo "CUDA_ROOT from env: $CUDA_ROOT"
-          echo "NVCC_PATH from env: $NVCC_PATH"
-          ls "$CUDA_ROOT/bin/" 2>/dev/null | head -10 || echo "bin/ not found"
-          "$CUDA_ROOT/bin/nvcc" --version 2>/dev/null || echo "nvcc not found"
-
-          cd /tmp/llama.cpp
-          mkdir build && cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DGGML_RPC=ON -DGGML_CUDA=ON \
-            -DCUDAToolkit_ROOT="$CUDA_ROOT" \
-            -DCMAKE_CUDA_COMPILER="${NVCC_PATH:-$CUDA_ROOT/bin/nvcc}" 2>&1 | tee /tmp/build-rpc-cuda.log
-          cmake --build . --config Release -j$(nproc) 2>&1 | tee -a /tmp/build-rpc-cuda.log
-
-      - name: Bundle rpc-server + libraries
-        run: |
-          mkdir -p /tmp/rpc-bundle/lib
-          cp /tmp/llama.cpp/build/bin/rpc-server /tmp/rpc-bundle/ 2>/dev/null || true
-          cp /tmp/llama.cpp/build/bin/llama-rpc-server /tmp/rpc-bundle/ 2>/dev/null || true
-
-          for dir in /tmp/llama.cpp/build/bin /tmp/llama.cpp/build; do
-            for f in "$dir"/libggml*.so "$dir"/libggml*.so.*; do
-              [ -f "$f" ] && cp "$f" /tmp/rpc-bundle/lib/
-            done
-          done
-
-          echo "=== Bundling CUDA runtime libraries ==="
-          ldd /tmp/rpc-bundle/rpc-server 2>/dev/null | grep -E 'cuda|cublas|cufft|curand|cusparse|cusolver|nvrtc|cublasLt|cudart' | awk '{print $1}' | while read lib; do
-            found=false
-            for search_dir in /usr/local/cuda/lib64 /usr/local/cuda-12.6/lib64 /usr/lib/x86_64-linux-gnu /usr/lib64 /lib/x86_64-linux-gnu; do
-              if [ -f "$search_dir/$lib" ]; then
-                cp -L "$search_dir/$lib" /tmp/rpc-bundle/lib/
-                found=true
-                break
-              fi
-            done
-            if [ "$found" = false ]; then
-              find / -name "$lib" -type f 2>/dev/null | head -1 | xargs -I{} cp -L "{}" /tmp/rpc-bundle/lib/ 2>/dev/null || true
-            fi
-          done
-
-          echo "=== Bundling cuda-compat for driver compatibility ==="
-          for compat_lib in /usr/lib/x86_64-linux-gnu/libcuda.so* /usr/lib/x86_64-linux-gnu/libnvidia.so* \
-                            /usr/local/cuda/compat/libcuda.so* /usr/local/cuda-12.6/compat/libcuda.so*; do
-            if [ -f "$compat_lib" ]; then
-              cp -L "$compat_lib" /tmp/rpc-bundle/lib/ 2>/dev/null || true
-            fi
-          done
-
-          if [ -d "/usr/lib/x86_64-linux-gnu" ]; then
-            for f in /usr/lib/x86_64-linux-gnu/libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so; do
-              [ -f "$f" ] && cp -L "$f" /tmp/rpc-bundle/lib/ 2>/dev/null || true
-            done
-          fi
-
-          for f in /tmp/rpc-bundle/lib/*; do
-            case "$(basename "$f")" in
-              *.so.*)
-                SOBASE=$(echo "$f" | sed 's/\(\.so\)\..*/\1/')
-                [ ! -L "$SOBASE" ] && [ -f "$SOBASE" ] && ln -sf "$(basename "$f")" "$SOBASE"
-                ;;
-            esac
-          done
-
-          echo "=== Bundle contents ==="
-          ls -la /tmp/rpc-bundle/
-          echo "=== Bundle libs ==="
-          ls -la /tmp/rpc-bundle/lib/
-
-      - name: Create archive
-        run: |
-          cd /tmp/rpc-bundle
-          FILES=""
-          [ -f rpc-server ] && FILES="$FILES rpc-server"
-          [ -f llama-rpc-server ] && FILES="$FILES llama-rpc-server"
-          tar czf /tmp/akai-agent-rpc-cuda-linux-x86_64.tar.gz $FILES lib/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: akai-agent-rpc-cuda-linux-x86_64
-          path: /tmp/akai-agent-rpc-cuda-linux-x86_64.tar.gz
-          retention-days: 5
-
-      - name: Notify webhook — failure
-        if: failure()
-        env:
-          WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
-        run: |
-          ERRORS=$(cat build-rpc-cuda.log 2>/dev/null || echo "Build step failed")
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          PAYLOAD=$(jq -cn \
-            --arg event    "rpc_cuda_build_failure" \
-            --arg repo     "${{ github.repository }}" \
-            --arg run_url  "$RUN_URL" \
-            --arg sha      "${{ github.sha }}" \
-            --arg ref      "${{ github.ref_name }}" \
-            --arg actor    "${{ github.actor }}" \
-            --arg errors   "$ERRORS" \
-            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,errors:$errors}')
-          SIG=$(printf '%s' "$PAYLOAD" | \
-            openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" | awk '{print "sha256="$2}')
-          curl -fsSL -X POST \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: rpc_cuda_build_failure" \
-            -H "X-Hub-Signature-256: $SIG" \
-            -d "$PAYLOAD" \
-            "https://webhook.akinus21.com/webhook/akai-agent-build" || true
-
   release:
-    needs: [build, build-rpc-cuda]
+    needs: [build]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -248,7 +73,7 @@ jobs:
           MIN=$(echo "$VER" | cut -d. -f2 | sed 's/^0*//'); MIN=${MIN:-0}
           PAT=$(echo "$VER" | cut -d. -f3 | sed 's/^0*//'); PAT=${PAT:-0}
           while git rev-parse "v${MAJ}.${MIN}.${PAT}" >/dev/null 2>&1; do
-            PAT=$((10#$PAT + 1))
+            PAT=$((10#PAT + 1))
           done
           echo "new_tag=v${MAJ}.${MIN}.${PAT}" >> $GITHUB_OUTPUT
 
@@ -259,9 +84,8 @@ jobs:
       - name: Collect artifacts
         run: |
           cp artifacts/akai-agent-linux-x86_64/akai-agent ./akai-agent
-          cp artifacts/akai-agent-rpc-cuda-linux-x86_64/akai-agent-rpc-cuda-linux-x86_64.tar.gz ./akai-agent-rpc-cuda-linux-x86_64.tar.gz
-          ls -la ./akai-agent ./akai-agent-rpc-cuda-linux-x86_64.tar.gz
-          sha256sum ./akai-agent ./akai-agent-rpc-cuda-linux-x86_64.tar.gz
+          ls -la ./akai-agent
+          sha256sum ./akai-agent
 
       - name: Update Cargo.toml version
         run: |
@@ -269,8 +93,8 @@ jobs:
           awk -F'= ' '/^\[package\]/{p=1} p && /^version/{gsub(/"[^"]+"/,"\"'"$VER"'\""); p=0} 1' \
             Cargo.toml > tmp && mv tmp Cargo.toml
           git add Cargo.toml
-          git config --global user.email "iron-bot@akinus21.com"
-          git config --global user.name "Iron Bot"
+          git config --global user.email "aktags-bot@akinus21.com"
+          git config --global user.name "AkTags Bot"
           git diff --cached --quiet || \
             git commit -m "chore: bump version to ${VER} [skip ci]"
 
@@ -280,8 +104,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
         run: |
           set -euo pipefail
-          git config --global user.email "iron-bot@akinus21.com"
-          git config --global user.name "Iron Bot"
+          git config --global user.email "aktags-bot@akinus21.com"
+          git config --global user.name "AkTags Bot"
           git remote set-url origin \
             "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           TAG="${{ steps.tag.outputs.new_tag }}"
@@ -290,11 +114,11 @@ jobs:
           git tag -a "$TAG" -m "Release $TAG"
           git push origin "$TAG"
           gh release create "$TAG" --title "$TAG" --notes "" \
-            akai-agent akai-agent-rpc-cuda-linux-x86_64.tar.gz
+            akai-agent
           echo "sha256=$SHA256" >> $GITHUB_OUTPUT
           echo "new_tag=$TAG"   >> $GITHUB_OUTPUT
 
-      - name: Update Homebrew tap (linux x86_64)
+      - name: Update Homebrew tap
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         env:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
@@ -303,7 +127,6 @@ jobs:
           [ -z "${TAP_TOKEN:-}" ] && echo "No TAP_TOKEN; skipping" && exit 0
           TAG="${{ steps.tag.outputs.new_tag }}"
           SHA="${{ steps.release.outputs.sha256 }}"
-          SHA_RPC=$(sha256sum akai-agent-rpc-cuda-linux-x86_64.tar.gz | awk '{print $1}')
           BASE="https://github.com/Akinus21/akai-agent/releases/download/${TAG}"
           TAP="/tmp/homebrew-tap"
           rm -rf "$TAP"
@@ -322,29 +145,16 @@ jobs:
               url "${BASE}/akai-agent"
               sha256 "${SHA}"
             end
-            resource "rpc-cuda" do
-              url "${BASE}/akai-agent-rpc-cuda-linux-x86_64.tar.gz"
-              sha256 "${SHA_RPC}"
-            end
             def install
               bin.install "akai-agent" => "akai-agent"
-              if OS.linux? && Hardware::CPU.intel?
-                resource("rpc-cuda").stage do
-                  (share/"akai-agent").mkpath
-                  cp "rpc-server", "#{share}/akai-agent/rpc-server" if File.exist?("rpc-server")
-                  cp "llama-rpc-server", "#{share}/akai-agent/llama-rpc-server" if File.exist?("llama-rpc-server")
-                  (share/"akai-agent/lib").mkpath
-                  cp_r "lib/.", "#{share}/akai-agent/lib/" if File.exist?("lib")
-                end
-              end
             end
             test do
               assert_match "akai-agent", shell_output("#{bin}/akai-agent --help")
             end
           end
           EOF
-          git config user.email "iron-bot@akinus21.com"
-          git config user.name "Iron Bot"
+          git config user.email "aktags-bot@akinus21.com"
+          git config user.name "AkTags Bot"
           git add Formula/akai-agent.rb
           git commit -m "Update akai-agent to ${TAG}"
           git push origin master

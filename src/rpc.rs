@@ -14,34 +14,6 @@ pub fn rpc_binary_path() -> PathBuf {
     crate::config::data_dir().join(binary_name())
 }
 
-fn homebrew_prefix() -> Option<PathBuf> {
-    if let Ok(output) = std::process::Command::new("which").arg("akai-agent").output() {
-        if output.status.success() {
-            let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let bin = PathBuf::from(&p);
-            if let Some(parent) = bin.parent() {
-                if parent.ends_with("bin") {
-                    if let Some(prefix) = parent.parent() {
-                        let share = prefix.join("share").join("akai-agent");
-                        if share.join(binary_name()).exists() {
-                            return Some(prefix.to_path_buf());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-fn preinstalled_rpc_binary() -> Option<PathBuf> {
-    homebrew_prefix().map(|p| p.join("share").join("akai-agent").join(binary_name()))
-}
-
-fn preinstalled_rpc_lib_dir() -> Option<PathBuf> {
-    homebrew_prefix().map(|p| p.join("share").join("akai-agent").join("lib"))
-}
-
 fn rpc_cuda_asset_name() -> Option<String> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Some("akai-agent-rpc-cuda-linux-x86_64.tar.gz".to_string()),
@@ -138,77 +110,41 @@ pub async fn ensure_rpc_server() -> Result<PathBuf> {
     let path = rpc_binary_path();
     let lib_dir = crate::config::data_dir().join("lib");
 
-    if let Some(preinstalled) = preinstalled_rpc_binary() {
-        if preinstalled.exists() {
-            let preinstalled_lib = preinstalled_rpc_lib_dir();
-            std::fs::create_dir_all(path.parent().unwrap())?;
-            std::fs::copy(&preinstalled, &path)?;
-            if let Some(src_lib) = preinstalled_lib {
-                if src_lib.exists() {
-                    std::fs::create_dir_all(&lib_dir)?;
-                    for entry in std::fs::read_dir(&src_lib)?.filter_map(|e| e.ok()) {
-                        let src = entry.path();
-                        if src.is_file() || src.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-                            let fname = src.file_name().unwrap_or_default();
-                            let dst = lib_dir.join(fname);
-                            if src.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-                                if let Ok(target) = std::fs::read_link(&src) {
-                                    let _ = std::os::unix::fs::symlink(&target, &dst);
-                                }
-                            } else {
-                                std::fs::copy(&src, &dst)?;
-                            }
-                        }
-                    }
-                }
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
-            }
-            if let Ok(mut cfg) = crate::config::load_config() {
-                cfg.rpc_binary = path.to_string_lossy().to_string();
-                cfg.rpc_version = "preinstalled+cuda".to_string();
-                let _ = crate::config::save_config(&cfg);
-            }
-            println!("rpc-server installed from Homebrew bundle (CUDA)");
-            return Ok(path);
-        }
-    }
-
-    let libs_valid = lib_dir.exists() && lib_files_valid(&lib_dir);
-
     #[cfg(target_os = "linux")]
     let needs_cuda = crate::build::needs_source_build() && !has_cuda_libs();
     #[cfg(not(target_os = "linux"))]
     let needs_cuda = false;
 
-    if !path.exists() || !libs_valid || needs_cuda {
-        if lib_dir.exists() {
-            std::fs::remove_dir_all(&lib_dir).ok();
-        }
-        std::fs::remove_file(&path).ok();
-
-        #[cfg(target_os = "linux")]
-        if crate::build::needs_source_build() {
-            match download_cuda_bundle().await {
-                Ok(()) => {
-                    if path.exists() {
-                        return Ok(path);
-                    }
-                }
-                Err(e) => eprintln!("Pre-built CUDA bundle download failed: {}. Trying source build.", e),
-            }
-
-            match crate::build::build_from_source() {
-                Ok(p) => return Ok(p),
-                Err(e) => eprintln!("Source build failed: {}. Falling back to CPU download.", e),
-            }
-        }
-
-        download_latest().await?;
+    if path.exists() && lib_dir.exists() && lib_files_valid(&lib_dir) && !needs_cuda {
+        return Ok(path);
     }
+
+    if lib_dir.exists() {
+        std::fs::remove_dir_all(&lib_dir).ok();
+    }
+    std::fs::remove_file(&path).ok();
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::create_dir_all(&lib_dir)?;
+
+    #[cfg(target_os = "linux")]
+    if crate::build::needs_source_build() {
+        println!("GPU detected — building rpc-server with CUDA support...");
+        match crate::build::build_from_source() {
+            Ok(p) => return Ok(p),
+            Err(e) => eprintln!("Source build failed: {}. Trying pre-built CUDA bundle.", e),
+        }
+
+        match download_cuda_bundle().await {
+            Ok(()) => {
+                if path.exists() {
+                    return Ok(path);
+                }
+            }
+            Err(e) => eprintln!("Pre-built CUDA bundle download failed: {}. Falling back to CPU.", e),
+        }
+    }
+
+    download_latest().await?;
     Ok(path)
 }
 

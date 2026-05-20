@@ -131,6 +131,36 @@ fn detect_distro_version() -> String {
     "unknown".to_string()
 }
 
+fn nvidia_driver_version() -> Option<String> {
+    let output = Command::new("nvidia-smi")
+        .args(["--query-gpu=driver_version", "--format=csv,noheader"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if version.is_empty() || version.contains("N/A") {
+        return None;
+    }
+    Some(version)
+}
+
+fn cuda_version_for_driver(driver_version: &str) -> (u32, u32) {
+    let major: u32 = driver_version.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(550);
+    if major >= 580 {
+        (13, 0)
+    } else if major >= 570 {
+        (12, 8)
+    } else if major >= 565 {
+        (12, 6)
+    } else if major >= 555 {
+        (12, 5)
+    } else {
+        (12, 4)
+    }
+}
+
 fn nvidia_cuda_repo_url() -> String {
     let distro = detect_distro();
     let version = detect_distro_version();
@@ -140,7 +170,7 @@ fn nvidia_cuda_repo_url() -> String {
             let major = version.split('.').next().unwrap_or("9");
             format!("{}", major)
         }),
-        "ubuntu" | "pop" => ("ubuntu", {
+        "ubuntu" | "pop" | "linuxmint" => ("ubuntu", {
             let v: f32 = version.parse().unwrap_or(24.04);
             format!("{:.0}", v * 10.0)
         }),
@@ -150,8 +180,232 @@ fn nvidia_cuda_repo_url() -> String {
     format!("https://developer.download.nvidia.com/compute/cuda/repos/{}{}/x86_64", repo_distro, repo_ver)
 }
 
+fn has_distrobox() -> bool {
+    find_in_paths("distrobox").is_some()
+}
+
+fn ensure_distrobox() -> Result<()> {
+    if has_distrobox() {
+        return Ok(());
+    }
+    println!("  Distrobox not found. Installing...");
+    let url = "https://distrobox.it/prereqs/shell/distrobox-install";
+    let status = Command::new("curl")
+        .args(["-fsSL", url])
+        .env("PATH", path_with_homebrew())
+        .output()
+        .context("Failed to download distrobox install script")?;
+    if !status.status.success() {
+        bail!("Failed to download distrobox");
+    }
+    let tmp_script = std::env::temp_dir().join("distrobox-install.sh");
+    let status = Command::new("curl")
+        .args(["-fsSL", "-o", &tmp_script.to_string_lossy(), url])
+        .env("PATH", path_with_homebrew())
+        .status()
+        .context("Failed to download distrobox")?;
+    if !status.success() {
+        bail!("Failed to download distrobox install script");
+    }
+    let status = Command::new("sh")
+        .arg(&tmp_script)
+        .env("PATH", path_with_homebrew())
+        .status()
+        .context("Failed to run distrobox install")?;
+    if !status.success() {
+        bail!("distrobox installation failed");
+    }
+    let _ = std::fs::remove_file(&tmp_script);
+    println!("  Distrobox installed.");
+    Ok(())
+}
+
+fn ensure_akai_container() -> Result<String> {
+    ensure_distrobox()?;
+    let container_name = "akai";
+    let output = Command::new("distrobox")
+        .args(["list", "--no-header"])
+        .env("PATH", path_with_homebrew())
+        .output()
+        .context("Failed to list distrobox containers")?;
+    let listing = String::from_utf8_lossy(&output.stdout);
+    if listing.lines().any(|l| l.contains(container_name)) {
+        println!("  Distrobox container '{}' already exists", container_name);
+        return Ok(container_name.to_string());
+    }
+    println!("  Creating distrobox container '{}'...", container_name);
+    let distro = if detect_distro() == "silverblue" || detect_distro() == "bluefin" {
+        "ubuntu:24.04"
+    } else {
+        "ubuntu:24.04"
+    };
+    let status = Command::new("distrobox")
+        .args(["create", "--name", container_name, "--image", distro, "--yes"])
+        .env("PATH", path_with_homebrew())
+        .status()
+        .context("Failed to create distrobox container")?;
+    if !status.success() {
+        bail!("Failed to create distrobox container '{}'", container_name);
+    }
+    println!("  Installing build tools in container...");
+    let status = Command::new("distrobox")
+        .args(["enter", container_name, "--", "sh", "-c",
+            "apt-get update -qq && apt-get install -y cmake gcc g++ git wget curl"])
+        .env("PATH", path_with_homebrew())
+        .status()
+        .context("Failed to install build tools in container")?;
+    if !status.success() {
+        bail!("Failed to install build tools in container");
+    }
+    Ok(container_name.to_string())
+}
+
+pub fn build_in_distrobox() -> Result<PathBuf> {
+    let container = ensure_akai_container()?;
+    let bin = crate::rpc::rpc_binary_path();
+    let lib_dir = data_dir().join("lib");
+    let src = source_dir();
+    let build = build_dir();
+    let data = data_dir();
+
+    let driver_ver = nvidia_driver_version().unwrap_or_default();
+    let (cuda_major, cuda_minor) = cuda_version_for_driver(&driver_ver);
+    let cuda_pkg = format!("cuda-toolkit-{}-{}", cuda_major, cuda_minor);
+
+    println!("  Detected NVIDIA driver {}, installing CUDA {}.{}", driver_ver, cuda_major, cuda_minor);
+
+    println!("  Installing CUDA toolkit {} in container...", cuda_pkg);
+    let cuda_install_cmd = format!(
+        "apt-get update -qq && \
+         wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && \
+         dpkg -i /tmp/cuda-keyring.deb && \
+         apt-get update -qq && \
+         apt-get install -y {pkg} && \
+         ldconfig",
+        pkg = cuda_pkg
+    );
+    let status = Command::new("distrobox")
+        .args(["enter", &container, "--", "sh", "-c", &cuda_install_cmd])
+        .env("PATH", path_with_homebrew())
+        .status()
+        .context("Failed to install CUDA toolkit in container")?;
+    if !status.success() {
+        println!("  CUDA toolkit install failed, trying individual packages...");
+        let fallback = format!(
+            "apt-get update -qq && \
+             wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && \
+             dpkg -i /tmp/cuda-keyring.deb && \
+             apt-get update -qq && \
+             apt-get install -y --fix-broken && \
+             for pkg in cuda-nvcc-{maj}-{min} cuda-cudart-{maj}-{min} cuda-cudart-dev-{maj}-{min} \
+                        cuda-cccl-{maj}-{min} cuda-cupti-{maj}-{min} \
+                        libcublas-dev-{maj}-{min} libcublas-{maj}-{min}; do \
+               apt-get install -y $pkg 2>/dev/null || true; \
+             done && \
+             ldconfig",
+            maj = cuda_major, min = cuda_minor
+        );
+        let status = Command::new("distrobox")
+            .args(["enter", &container, "--", "sh", "-c", &fallback])
+            .env("PATH", path_with_homebrew())
+            .status()
+            .context("Failed to install CUDA packages in container")?;
+        if !status.success() {
+            eprintln!("  CUDA installation failed. Building CPU-only.");
+        }
+    }
+
+    let mount_src = format!("--volume={}:/opt/llama.cpp", src.to_string_lossy());
+    let mount_data = format!("--volume={}:/opt/akai-data", data.to_string_lossy());
+
+    let has_nvcc_out = Command::new("distrobox")
+        .args(["enter", &container, "--", "sh", "-c", "which nvcc 2>/dev/null || echo ''"])
+        .env("PATH", path_with_homebrew())
+        .output()
+        .context("Failed to check for nvcc")?;
+    let has_nvcc = !String::from_utf8_lossy(&has_nvcc_out.stdout).trim().is_empty();
+
+    let cmake_args = if has_nvcc {
+        "-DGGML_CUDA=ON -DGGML_RPC=ON"
+    } else {
+        "-DGGML_RPC=ON"
+    };
+
+    println!("  Building rpc-server in distrobox (CUDA: {})...", has_nvcc);
+
+    let build_cmd = format!(
+        "if [ ! -d /opt/llama.cpp/.git ]; then \
+           git clone --depth 1 {repo} /opt/llama.cpp; \
+         fi && \
+         mkdir -p /opt/llama.cpp/build && \
+         cd /opt/llama.cpp/build && \
+         cmake .. -DCMAKE_BUILD_TYPE=Release {cmake_args} && \
+         cmake --build . --config Release -j$(nproc)",
+        repo = LLAMA_CPP_REPO,
+        cmake_args = cmake_args
+    );
+
+    let status = Command::new("distrobox")
+        .args(["enter", &container, "--", "sh", "-c", &build_cmd])
+        .env("PATH", path_with_homebrew())
+        .status()
+        .context("Failed to build in distrobox")?;
+    if !status.success() {
+        bail!("Build failed in distrobox");
+    }
+
+    let container_src = "/opt/llama.cpp";
+    let copy_cmd = format!(
+        "cp {container_src}/build/bin/rpc-server {dest}/rpc-server 2>/dev/null || \
+         cp {container_src}/build/bin/llama-rpc-server {dest}/rpc-server 2>/dev/null || true",
+        container_src = container_src,
+        dest = "/opt/akai-data"
+    );
+    Command::new("distrobox")
+        .args(["enter", &container, "--", "sh", "-c", &copy_cmd])
+        .env("PATH", path_with_homebrew())
+        .status()
+        .context("Failed to copy binary from container")?;
+
+    let copy_libs = format!(
+        "for dir in {container_src}/build/bin {container_src}/build; do \
+           for f in \"$dir\"/libggml*.so \"$dir\"/libggml*.so.*; do \
+             [ -f \"$f\" ] && cp \"$f\" /opt/akai-data/lib/ 2>/dev/null || true; \
+           done; \
+         done",
+        container_src = container_src
+    );
+    std::fs::create_dir_all(&lib_dir)?;
+    Command::new("distrobox")
+        .args(["enter", &container, "--", "sh", "-c", &copy_libs])
+        .env("PATH", path_with_homebrew())
+        .status()
+        .context("Failed to copy libs from container")?;
+
+    let built_bin = data_dir().join("rpc-server");
+    if !built_bin.exists() {
+        bail!("Built binary not found in data dir");
+    }
+    std::fs::copy(&built_bin, &bin)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    let cuda_label = if has_nvcc { "source-cuda" } else { "source-cpu" };
+    if let Ok(mut cfg) = crate::config::load_config() {
+        cfg.rpc_version = cuda_label.to_string();
+        cfg.rpc_binary = bin.to_string_lossy().to_string();
+        let _ = crate::config::save_config(&cfg);
+    }
+
+    println!("  rpc-server built from source in distrobox (CUDA: {})", has_nvcc);
+    Ok(bin)
+}
+
 fn homebrew_install_build_tools() -> Result<()> {
-    println!("  Installing build tools via Homebrew (works on atomic/immutable distros)...");
+    println!("  Installing build tools via Homebrew...");
     let brew = find_in_paths("brew")
         .context("Homebrew not found. On atomic distros like Silverblue, install Homebrew:\n  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"")?;
 
@@ -174,70 +428,68 @@ pub fn install_cuda_toolkit() -> Result<()> {
     }
 
     println!("  Installing CUDA toolkit...");
+    let driver_ver = nvidia_driver_version().unwrap_or_default();
+    let (cuda_major, cuda_minor) = cuda_version_for_driver(&driver_ver);
+    println!("  Detected NVIDIA driver {}, selecting CUDA {}.{}", driver_ver, cuda_major, cuda_minor);
 
     if is_ostree() && !is_container() {
         if !can_sudo() {
             bail!(
                 "CUDA toolkit requires sudo on Silverblue/atomic distros.\n\
                  Options:\n\
-                 1. Run inside a Distrobox/toolbox container (recommended)\n\
+                 1. Run inside a Distrobox container (recommended)\n\
                  2. Run with sudo: rpm-ostree install cuda-toolkit (requires reboot)\n\
                  3. Install manually from https://developer.nvidia.com/cuda-downloads"
             );
         }
-
-        println!("  Silverblue/atomic distro detected. CUDA requires layered packages via rpm-ostree.");
-        println!("  This will require a REBOOT before the CUDA toolkit is available.");
-        println!("  Alternatively, run akai-agent inside a Distrobox container for a seamless experience.");
-
-        let status = Command::new("sudo")
-            .args(["rpm-ostree", "install", "-y", "cuda-toolkit"])
-            .status()
-            .context("Failed to run rpm-ostree install")?;
-
-        if status.success() {
-            bail!(
-                "CUDA toolkit installed via rpm-ostree. A REBOOT is required.\n\
-                 After reboot, run: akai-agent start"
-            );
-        }
-        bail!("rpm-ostree install failed. Try running inside a Distrobox container or install manually.");
+        println!("  Silverblue/atomic distro detected. Installing via distrobox...");
+        return build_in_distrobox().map(|_| ());
     }
 
     let pkg_mgr = detect_pkg_manager();
+    let cuda_pkg = format!("cuda-toolkit-{}-{}", cuda_major, cuda_minor);
     let status = match pkg_mgr {
         "apt-get" => {
-            println!("  Adding NVIDIA CUDA repository...");
-            Command::new("sudo")
-                .args(["sh", "-c", "wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && dpkg -i /tmp/cuda-keyring_1.1-1_all.deb && apt-get update -qq && apt-get install -y cuda-toolkit"])
-                .status()
-        }
-        "dnf" => {
-            let distro = detect_distro();
-            let (_repo_id, repo_url) = if distro == "fedora" {
-                ("cuda-fedora", nvidia_cuda_repo_url())
-            } else {
-                ("cuda-rhel", nvidia_cuda_repo_url())
-            };
+            let repo_url = nvidia_cuda_repo_url();
             println!("  Adding NVIDIA CUDA repository...");
             Command::new("sudo")
                 .args(["sh", "-c", &format!(
-                    "dnf config-manager --add-repo={url} && dnf install -y cuda-toolkit",
-                    url = repo_url
+                    "wget -q {url}/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && \
+                     dpkg -i /tmp/cuda-keyring.deb && \
+                     apt-get update -qq && \
+                     apt-get install -y {pkg}",
+                    url = repo_url, pkg = cuda_pkg
+                )])
+                .status()
+        }
+        "rpm-ostree" => {
+            Command::new("sudo")
+                .args(["rpm-ostree", "install", "-y", &cuda_pkg])
+                .status()
+        }
+        "dnf" => {
+            let repo_url = nvidia_cuda_repo_url();
+            Command::new("sudo")
+                .args(["sh", "-c", &format!(
+                    "dnf config-manager --add-repo={url} && dnf install -y {pkg}",
+                    url = repo_url, pkg = cuda_pkg
                 )])
                 .status()
         }
         "yum" => {
             Command::new("sudo")
                 .args(["sh", "-c", &format!(
-                    "yum-config-manager --add-repo={url} && yum install -y cuda-toolkit",
-                    url = nvidia_cuda_repo_url()
+                    "yum-config-manager --add-repo={url} && yum install -y {pkg}",
+                    url = nvidia_cuda_repo_url(), pkg = cuda_pkg
                 )])
                 .status()
         }
         "zypper" => {
             Command::new("sudo")
-                .args(["sh", "-c", "zypper addrepo https://developer.download.nvidia.com/compute/cuda/repos/opensuse15/x86_64/ && zypper install -y cuda-toolkit"])
+                .args(["sh", "-c", &format!(
+                    "zypper addrepo https://developer.download.nvidia.com/compute/cuda/repos/opensuse15/x86_64/ && zypper install -y {pkg}",
+                    pkg = cuda_pkg
+                )])
                 .status()
         }
         "pacman" => {
@@ -333,6 +585,13 @@ pub fn install_build_tools() -> Result<()> {
 }
 
 pub fn build_from_source() -> Result<PathBuf> {
+    if (is_ostree() || is_container()) && !is_container() {
+        if is_ostree() && !is_container() {
+            println!("  Atomic/immutable distro detected. Using distrobox for build...");
+            return build_in_distrobox();
+        }
+    }
+
     let src = source_dir();
     let bin = crate::rpc::rpc_binary_path();
     let lib_dir = data_dir().join("lib");
@@ -397,10 +656,28 @@ pub fn build_from_source() -> Result<PathBuf> {
     cmake_cmd.env("PATH", &env_path);
     if nvcc_available {
         let ld_path = format!(
-            "/usr/local/cuda/lib64:/home/linuxbrew/.linuxbrew/lib:{}",
+            "/usr/local/cuda/lib64:/usr/local/cuda-{}.{}{/lib64}:/home/linuxbrew/.linuxbrew/lib:{}",
+            nvidia_driver_version().and_then(|v| {
+                let (maj, min) = cuda_version_for_driver(&v);
+                Some(format!("{}.{}", maj, min))
+            }).unwrap_or_else(|| "12.4".to_string()),
+            "/home/linuxbrew/.linuxbrew/lib",
+            std::env::var("LD_LIBRARY_PATH").unwrap_or_default()
+        );
+        let cuda_root = format!("/usr/local/cuda-{}", 
+            nvidia_driver_version().and_then(|v| {
+                let (maj, min) = cuda_version_for_driver(&v);
+                Some(format!("{}.{}", maj, min))
+            }).unwrap_or_else(|| "12.4".to_string())
+        );
+        let ld_path = format!(
+            "{cuda_root}/lib64:/usr/local/cuda/lib64:/home/linuxbrew/.linuxbrew/lib:{}",
             std::env::var("LD_LIBRARY_PATH").unwrap_or_default()
         );
         cmake_cmd.env("LD_LIBRARY_PATH", &ld_path);
+        let _ = cmake_cmd.arg(format!("-DCUDAToolkit_ROOT={}", cuda_root));
+        let nvcc_path = format!("{}/bin/nvcc", cuda_root);
+        let _ = cmake_cmd.arg(format!("-DCMAKE_CUDA_COMPILER={}", nvcc_path));
     }
     let status = cmake_cmd.status().context("Failed to run cmake")?;
     if !status.success() {

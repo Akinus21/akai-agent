@@ -60,7 +60,7 @@ ollama-queue proxy
 - NO Ollama dependency — workers run `rpc-server` (from llama.cpp), NOT Ollama
 - NO GPU crates (nvml-wrapper, cuda-sys) — shell out to nvidia-smi/rocm-smi only (gpu.rs)
 - WireGuard AllowedIPs = 10.8.0.0/24 ONLY — never 0.0.0.0/0
-- `rpc-server` binary is downloaded from ggml-org/llama.cpp GitHub Releases at runtime
+- `rpc-server` binary is built from source on the user's machine (with CUDA) or downloaded from llama.cpp (CPU fallback)
 - Workers bind rpc-server to 0.0.0.0 but it is only reachable via WireGuard
 - Port 50052 must NEVER be exposed to the public internet
 - Graceful shutdown on Ctrl+C: kill rpc-server child → DELETE /workers/{id} → exit
@@ -74,7 +74,7 @@ ollama-queue proxy
 | `src/config.rs` | Config struct, load/save, paths |
 | `src/gpu.rs` | GPU detection (nvidia-smi / rocm-smi) |
 | `src/rpc.rs` | Download, version-check, spawn rpc-server |
-| `src/build.rs` | Build rpc-server from source (CUDA detection) |
+| `src/build.rs` | Build rpc-server from source (CUDA detection, distrobox support) |
 | `src/queue_client.rs` | HTTP client for ollama-queue registry API |
 | `src/wireguard/` | Per-OS WireGuard setup (linux/macos/windows) |
 | `src/service/` | systemd / launchd / Windows Service installers |
@@ -90,14 +90,18 @@ Heartbeat returning 404 means the worker fell out of registry → re-register au
 
 ## rpc-server Binary Management
 Three-tier approach (in order of priority):
-1. **Pre-built CUDA bundle** (Linux x86_64 only): Downloaded from this repo's GitHub Release
+1. **Source build** (Linux x86_64 with NVIDIA/AMD GPU): Builds llama.cpp locally with CUDA
+   - Detects GPU and NVIDIA driver version via `nvidia-smi`
+   - Selects matching CUDA toolkit version (driver-aware)
+   - Auto-installs build tools (cmake, gcc, git) if missing
+   - Auto-installs CUDA toolkit via apt/dnf/pacman if missing
+   - On atomic/immutable distros (Silverblue, Bluefin): creates a distrobox container named `akai` using Ubuntu 24.04, installs CUDA toolkit + build tools inside, builds rpc-server, copies result back out
+   - Falls back to CPU-only build if CUDA toolkit install fails
+2. **Pre-built CUDA bundle** (fallback, Linux x86_64 only): Downloaded from this repo's GitHub Release
    `akai-agent-rpc-cuda-linux-x86_64.tar.gz` — contains rpc-server + libggml*.so with CUDA
-2. **Source build** (fallback, Linux x86_64 with NVIDIA GPU): Builds llama.cpp locally with `-DGGML_CUDA=ON`
-   - Auto-installs build tools and CUDA toolkit if missing
-   - Detects atomic/immutable distros (Silverblue) and uses Homebrew/rpm-ostree accordingly
+   - May not work on all driver versions (CUDA runtime must match driver)
 3. **CPU-only download** (fallback for all platforms): Downloads pre-built from llama.cpp GitHub Releases
 
-- Homebrew formula `post_install` extracts the CUDA bundle into `~/.local/share/akai-agent/`
 - GitHub APIs: `Akinus21/akai-agent` releases (CUDA bundle) + `ggml-org/llama.cpp` releases (CPU-only)
 - Always include header: `User-Agent: akai-agent/<version>`
 - Stored at: ~/.local/share/akai-agent/rpc-server (Linux/macOS)
@@ -106,6 +110,16 @@ Three-tier approach (in order of priority):
 - LD_LIBRARY_PATH set to lib/ dir when spawning rpc-server on Linux
 - Daily update check in start loop; manual: `akai-agent update-rpc`
 - Version stored in config.toml as `rpc_version`
+
+## Driver-to-CUDA Mapping
+| Driver version | CUDA toolkit |
+|---|---|
+| >= 580 | 13.0 |
+| >= 570 | 12.8 |
+| >= 565 | 12.6 |
+| >= 555 | 12.5 |
+| >= 550 | 12.4 |
+| < 550 | CPU only |
 
 ## Platform Asset Mapping
 | Platform | GitHub Release Asset |
@@ -117,8 +131,9 @@ Three-tier approach (in order of priority):
 | Windows x86_64 | llama-*-bin-win-cuda-cu12.2.0-x64.zip |
 
 ## CI/CD
-- `build.yml`: push to main → build linux x86_64 + build rpc-server with CUDA → GitHub Release → update Homebrew tap → webhook
-- `release.yml`: tag push (auto from build.yml) → cross-compile 5 targets + build rpc-server CUDA bundle → upload all to release → full multi-platform Homebrew formula with rpc-cuda resource
+- `build.yml`: push to main → build linux x86_64 binary → GitHub Release → update Homebrew tap → webhook
+- `release.yml`: tag push (auto from build.yml) → cross-compile 5 targets → upload all to release → Homebrew formula
+- No CI CUDA bundle — rpc-server is built on the user's machine for driver compatibility
 - Webhook endpoint: `https://webhook.akinus21.com/webhook/akai-agent-build`
 - On failure: full build log sent in `errors` field of webhook payload
 - On success: tag and image info sent
