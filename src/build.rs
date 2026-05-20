@@ -264,9 +264,6 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
     let container = ensure_akai_container()?;
     let bin = crate::rpc::rpc_binary_path();
     let lib_dir = data_dir().join("lib");
-    let src = source_dir();
-    let build = build_dir();
-    let data = data_dir();
 
     let driver_ver = nvidia_driver_version().unwrap_or_default();
     let (cuda_major, cuda_minor) = cuda_version_for_driver(&driver_ver);
@@ -315,9 +312,6 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
         }
     }
 
-    let mount_src = format!("--volume={}:/opt/llama.cpp", src.to_string_lossy());
-    let mount_data = format!("--volume={}:/opt/akai-data", data.to_string_lossy());
-
     let has_nvcc_out = Command::new("distrobox")
         .args(["enter", &container, "--", "sh", "-c", "which nvcc 2>/dev/null || echo ''"])
         .env("PATH", path_with_homebrew())
@@ -333,16 +327,30 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
 
     println!("  Building rpc-server in distrobox (CUDA: {})...", has_nvcc);
 
+    let llama_src = format!("{}", source_dir().to_string_lossy());
+    let data_path = format!("{}", data_dir().to_string_lossy());
+    std::fs::create_dir_all(&lib_dir)?;
+
     let build_cmd = format!(
-        "if [ ! -d /opt/llama.cpp/.git ]; then \
-           git clone --depth 1 {repo} /opt/llama.cpp; \
+        "if [ ! -d '{src}/.git' ]; then \
+           git clone --depth 1 {repo} '{src}'; \
          fi && \
-         mkdir -p /opt/llama.cpp/build && \
-         cd /opt/llama.cpp/build && \
+         mkdir -p '{src}/build' && \
+         cd '{src}/build' && \
          cmake .. -DCMAKE_BUILD_TYPE=Release {cmake_args} && \
-         cmake --build . --config Release -j$(nproc)",
+         cmake --build . --config Release -j$(nproc) && \
+         cp '{src}/build/bin/rpc-server' '{data}/rpc-server' 2>/dev/null || \
+         cp '{src}/build/bin/llama-rpc-server' '{data}/rpc-server' 2>/dev/null || true && \
+         mkdir -p '{data}/lib' && \
+         for dir in '{src}/build/bin' '{src}/build'; do \
+           for f in \"$dir\"/libggml*.so \"$dir\"/libggml*.so.*; do \
+             [ -f \"$f\" ] && cp \"$f\" '{data}/lib/' 2>/dev/null || true; \
+           done; \
+         done",
+        src = llama_src,
         repo = LLAMA_CPP_REPO,
-        cmake_args = cmake_args
+        cmake_args = cmake_args,
+        data = data_path
     );
 
     let status = Command::new("distrobox")
@@ -354,37 +362,9 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
         bail!("Build failed in distrobox");
     }
 
-    let container_src = "/opt/llama.cpp";
-    let copy_cmd = format!(
-        "cp {container_src}/build/bin/rpc-server {dest}/rpc-server 2>/dev/null || \
-         cp {container_src}/build/bin/llama-rpc-server {dest}/rpc-server 2>/dev/null || true",
-        container_src = container_src,
-        dest = "/opt/akai-data"
-    );
-    Command::new("distrobox")
-        .args(["enter", &container, "--", "sh", "-c", &copy_cmd])
-        .env("PATH", path_with_homebrew())
-        .status()
-        .context("Failed to copy binary from container")?;
-
-    let copy_libs = format!(
-        "for dir in {container_src}/build/bin {container_src}/build; do \
-           for f in \"$dir\"/libggml*.so \"$dir\"/libggml*.so.*; do \
-             [ -f \"$f\" ] && cp \"$f\" /opt/akai-data/lib/ 2>/dev/null || true; \
-           done; \
-         done",
-        container_src = container_src
-    );
-    std::fs::create_dir_all(&lib_dir)?;
-    Command::new("distrobox")
-        .args(["enter", &container, "--", "sh", "-c", &copy_libs])
-        .env("PATH", path_with_homebrew())
-        .status()
-        .context("Failed to copy libs from container")?;
-
     let built_bin = data_dir().join("rpc-server");
     if !built_bin.exists() {
-        bail!("Built binary not found in data dir");
+        bail!("Built binary not found at {}", built_bin.display());
     }
     std::fs::copy(&built_bin, &bin)?;
     #[cfg(unix)]
@@ -652,32 +632,22 @@ pub fn build_from_source() -> Result<PathBuf> {
     cmake_cmd.arg("-DGGML_RPC=ON");
     if nvcc_available {
         cmake_cmd.arg("-DGGML_CUDA=ON");
-    }
-    cmake_cmd.env("PATH", &env_path);
-    if nvcc_available {
-        let ld_path = format!(
-            "/usr/local/cuda/lib64:/usr/local/cuda-{}.{}{/lib64}:/home/linuxbrew/.linuxbrew/lib:{}",
-            nvidia_driver_version().and_then(|v| {
+
+        let cuda_ver = nvidia_driver_version()
+            .map(|v| {
                 let (maj, min) = cuda_version_for_driver(&v);
-                Some(format!("{}.{}", maj, min))
-            }).unwrap_or_else(|| "12.4".to_string()),
-            "/home/linuxbrew/.linuxbrew/lib",
-            std::env::var("LD_LIBRARY_PATH").unwrap_or_default()
-        );
-        let cuda_root = format!("/usr/local/cuda-{}", 
-            nvidia_driver_version().and_then(|v| {
-                let (maj, min) = cuda_version_for_driver(&v);
-                Some(format!("{}.{}", maj, min))
-            }).unwrap_or_else(|| "12.4".to_string())
-        );
+                format!("{}.{}", maj, min)
+            })
+            .unwrap_or_else(|| "12.4".to_string());
+        let cuda_root = format!("/usr/local/cuda-{}", cuda_ver);
         let ld_path = format!(
-            "{cuda_root}/lib64:/usr/local/cuda/lib64:/home/linuxbrew/.linuxbrew/lib:{}",
+            "{}/lib64:/usr/local/cuda/lib64:/home/linuxbrew/.linuxbrew/lib:{}",
+            cuda_root,
             std::env::var("LD_LIBRARY_PATH").unwrap_or_default()
         );
         cmake_cmd.env("LD_LIBRARY_PATH", &ld_path);
-        let _ = cmake_cmd.arg(format!("-DCUDAToolkit_ROOT={}", cuda_root));
-        let nvcc_path = format!("{}/bin/nvcc", cuda_root);
-        let _ = cmake_cmd.arg(format!("-DCMAKE_CUDA_COMPILER={}", nvcc_path));
+        cmake_cmd.arg(format!("-DCUDAToolkit_ROOT={}", cuda_root));
+        cmake_cmd.arg(format!("-DCMAKE_CUDA_COMPILER={}/bin/nvcc", cuda_root));
     }
     let status = cmake_cmd.status().context("Failed to run cmake")?;
     if !status.success() {

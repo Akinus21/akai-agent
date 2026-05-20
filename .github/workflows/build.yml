@@ -53,6 +53,54 @@ jobs:
           if-no-files-found: error
           retention-days: 5
 
+      - name: Notify webhook — failure
+        if: failure()
+        env:
+          WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
+        run: |
+          ERRORS=$(cat build.log 2>/dev/null || echo "Build failed")
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          PAYLOAD=$(jq -cn \
+            --arg event    "build_failure" \
+            --arg repo     "${{ github.repository }}" \
+            --arg run_url  "$RUN_URL" \
+            --arg sha      "${{ github.sha }}" \
+            --arg ref      "${{ github.ref_name }}" \
+            --arg actor    "${{ github.actor }}" \
+            --arg errors   "$ERRORS" \
+            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,errors:$errors}')
+          SIG=$(printf '%s' "$PAYLOAD" | \
+            openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" | awk '{print "sha256="$2}')
+          curl -fsSL -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: build_failure" \
+            -H "X-Hub-Signature-256: $SIG" \
+            -d "$PAYLOAD" \
+            "https://webhook.akinus21.com/webhook/akai-agent-build" || true
+
+      - name: Notify webhook — success
+        if: success() && github.ref == 'refs/heads/main'
+        env:
+          WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          PAYLOAD=$(jq -cn \
+            --arg event   "build_success" \
+            --arg repo    "${{ github.repository }}" \
+            --arg run_url "$RUN_URL" \
+            --arg sha     "${{ github.sha }}" \
+            --arg ref     "${{ github.ref_name }}" \
+            --arg actor   "${{ github.actor }}" \
+            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor}')
+          SIG=$(printf '%s' "$PAYLOAD" | \
+            openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" | awk '{print "sha256="$2}')
+          curl -fsSL -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: build_success" \
+            -H "X-Hub-Signature-256: $SIG" \
+            -d "$PAYLOAD" \
+            "https://webhook.akinus21.com/webhook/akai-agent-build" || true
+
   release:
     needs: [build]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
