@@ -390,6 +390,14 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
     let llama_src = format!("{}", eff_src.to_string_lossy());
     let data_path = format!("{}", eff_data.to_string_lossy());
 
+    if let Some(user) = sudo_user() {
+        let eff_path_str = format!("{}", eff_data.to_string_lossy());
+        println!("  Fixing ownership of {} for user {}...", eff_path_str, user);
+        let _ = Command::new("chown")
+            .args(["-R", &format!("{}:", user), &eff_path_str])
+            .status();
+    }
+
     let mkdir_cmd = format!("mkdir -p '{data}/lib' '{src}'", data = data_path, src = llama_src);
     let status = run_distrobox(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), mkdir_cmd])?;
     if !status.success() {
