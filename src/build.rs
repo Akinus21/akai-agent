@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const LLAMA_CPP_REPO: &str = "https://github.com/ggml-org/llama.cpp.git";
-const LLAMA_CPP_VERSION: &str = "master-a8681a0";
+const LLAMA_CPP_VERSION: &str = "a8681a0";
 
 const HOMEBREW_PATHS: &[&str] = &[
     "/home/linuxbrew/.linuxbrew/bin",
@@ -439,9 +439,9 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
     let build_cmd = format!(
         "export PATH=/usr/local/cuda-{maj}.{min}/bin:$PATH && \
          if [ ! -d '{src}/.git' ]; then \
-           git clone --depth 1 --branch {version} {repo} '{src}'; \
+           git clone --depth 100 {repo} '{src}'; \
          fi && \
-         cd '{src}' && git fetch origin {version} && git checkout {version} && \
+         cd '{src}' && git fetch origin {version} 2>/dev/null; git checkout {version} && \
          mkdir -p '{src}/build' && \
          cd '{src}/build' && \
          for libdir in /run/host/usr/lib/x86_64-linux-gnu /run/host/usr/lib64 /run/host/lib/x86_64-linux-gnu /run/host/lib64 /usr/lib/x86_64-linux-gnu; do \
@@ -740,23 +740,26 @@ pub fn build_from_source() -> Result<PathBuf> {
     if !src.exists() {
         println!("  Cloning llama.cpp repository...");
         let status = Command::new(&git)
-            .args(["clone", "--depth", "1", "--branch", LLAMA_CPP_VERSION, LLAMA_CPP_REPO, &src.to_string_lossy()])
+            .args(["clone", "--depth", "100", LLAMA_CPP_REPO, &src.to_string_lossy()])
             .env("PATH", &env_path)
             .status()
             .context("Failed to run git clone")?;
         if !status.success() {
             bail!("git clone failed");
         }
-    } else {
-        println!("  Checking out llama.cpp {}...", LLAMA_CPP_VERSION);
-        let _ = Command::new(&git)
-            .args(["-C", &src.to_string_lossy(), "fetch", "origin", LLAMA_CPP_VERSION])
-            .env("PATH", &env_path)
-            .status();
-        let _ = Command::new(&git)
-            .args(["-C", &src.to_string_lossy(), "checkout", LLAMA_CPP_VERSION])
-            .env("PATH", &env_path)
-            .status();
+    }
+    println!("  Checking out llama.cpp {}...", LLAMA_CPP_VERSION);
+    let _ = Command::new(&git)
+        .args(["-C", &src.to_string_lossy(), "fetch", "origin"])
+        .env("PATH", &env_path)
+        .status();
+    let checkout = Command::new(&git)
+        .args(["-C", &src.to_string_lossy(), "checkout", LLAMA_CPP_VERSION])
+        .env("PATH", &env_path)
+        .status()
+        .context("Failed to checkout llama.cpp version")?;
+    if !checkout.success() {
+        bail!("git checkout {} failed", LLAMA_CPP_VERSION);
     }
 
     let build = build_dir();
