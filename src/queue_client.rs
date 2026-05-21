@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -104,9 +104,9 @@ impl QueueClient {
     fn auth_headers(&self, method: &str, path: &str, body: &[u8]) -> Result<reqwest::header::HeaderMap> {
         let (ts, sig) = self.sign(method, path, body)?;
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("X-Akai-Username", self.username.parse().unwrap_or_default());
-        headers.insert("X-Akai-Timestamp", ts.parse().unwrap_or_default());
-        headers.insert("X-Akai-Signature", sig.parse().unwrap_or_default());
+        headers.insert("X-Akai-Username", self.username.parse().context("Invalid username header")?);
+        headers.insert("X-Akai-Timestamp", ts.parse().context("Invalid timestamp header")?);
+        headers.insert("X-Akai-Signature", sig.parse().context("Invalid signature header")?);
         Ok(headers)
     }
 

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use base64::Engine;
 use ed25519_dalek::{SigningKey, Signer, Signature, Verifier};
 use rand::rngs::OsRng;
 use std::io::{self, Write};
