@@ -817,13 +817,15 @@ pub fn build_from_source() -> Result<PathBuf> {
     println!("  Copying shared libraries...");
     copy_libs(&build, &lib_dir)?;
 
+    let cuda_enabled = nvcc_available;
+
     if let Ok(mut cfg) = crate::config::load_config() {
-        cfg.rpc_version = if nvcc_available { "source-cuda" } else { "source-cpu" }.to_string();
+        cfg.rpc_version = if cuda_enabled { "source-cuda" } else { "source-cpu" }.to_string();
         cfg.rpc_binary = bin.to_string_lossy().to_string();
         let _ = crate::config::save_config(&cfg);
     }
 
-    println!("rpc-server built from source (CUDA: {})", nvcc_available);
+    println!("rpc-server built from source (CUDA: {})", cuda_enabled);
     Ok(bin)
 }
 
