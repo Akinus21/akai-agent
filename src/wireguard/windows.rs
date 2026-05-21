@@ -37,13 +37,13 @@ pub fn configure(provision: &ProvisionResponse) -> Result<()> {
         endpoint
     );
 
-    let iface = wg_ip.rsplitn(2, '.').last().unwrap_or("1");
-    let cfg_file = wg_dir.join(format!("wg{}.conf", iface));
+    let name = "wg0";
+    let cfg_file = wg_dir.join(format!("{}.conf", name));
     fs::write(&cfg_file, &config)?;
 
     let output = Command::new("wireguard.exe")
         .arg("/install-tunnels")
-        .arg(&format!("wg{}", iface))
+        .arg(name)
         .output()?;
 
     if !output.status.success() {

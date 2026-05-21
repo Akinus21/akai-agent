@@ -5,9 +5,8 @@ use std::process::Command;
 use std::time::Duration;
 use crate::queue_client::ProvisionResponse;
 
-fn iface_name(wg_ip: &str) -> String {
-    let iface = wg_ip.rsplitn(2, '.').last().unwrap_or("1");
-    format!("wg{}", iface)
+fn iface_name(_wg_ip: &str) -> String {
+    "wg0".to_string()
 }
 
 fn is_ostree() -> bool {
@@ -212,7 +211,7 @@ fn bring_up_manual(name: &str, wg_ip: &str, server_public_key: &str, endpoint: &
 
     let status = Command::new("sudo")
         .args(["wg", "set", name,
-               "private-key", "/etc/wireguard/{}.conf"])
+               "private-key", &format!("/etc/wireguard/{}.conf", name)])
         .status();
     let status = if status.as_ref().is_err() || !status.as_ref().unwrap().success() {
         let tmp_key = format!("/tmp/{}_privatekey", name);
@@ -281,12 +280,13 @@ fn configure_via_distrobox(name: &str, config: &str) -> Result<()> {
     let tmp_conf = format!("/tmp/{}.conf", name);
     fs::write(&tmp_conf, config)?;
 
+    let host_conf = format!("/run/host{}", tmp_conf);
     let enter_cmd = format!(
         "sudo mkdir -p /etc/wireguard && \
-         sudo cp /run/host/{}/{}_conf /etc/wireguard/{}.conf && \
+         sudo cp {} /etc/wireguard/{}.conf && \
          sudo wg-quick down {} 2>/dev/null; \
          sudo wg-quick up {}",
-        tmp_conf, name, name, name, name
+        host_conf, name, name, name
     );
 
     println!("  Starting WireGuard via distrobox...");

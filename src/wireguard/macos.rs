@@ -35,12 +35,12 @@ pub fn configure(provision: &ProvisionResponse) -> Result<()> {
         endpoint
     );
 
-    let iface = wg_ip.rsplitn(2, '.').last().unwrap_or("1");
-    let cfg_file = wg_dir.join(format!("wg{}", iface));
+    let name = "wg0";
+    let cfg_file = wg_dir.join(format!("{}.conf", name));
     fs::write(&cfg_file, &config)?;
 
     let output = Command::new("wg-quick")
-        .args(["up", &format!("wg{}", iface)])
+        .args(["up", name])
         .output()?;
 
     if !output.status.success() {
