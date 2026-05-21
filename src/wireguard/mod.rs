@@ -17,19 +17,25 @@ pub async fn configure(provision: &ProvisionResponse) -> Result<()> {
 pub fn check_tunnel(wg_ip: &str) -> bool {
     match std::env::consts::OS {
         "linux" => linux::check_tunnel(wg_ip),
-        "macos" | "windows" => {
+        _ => {
             let name = "wg0";
             let output = std::process::Command::new("wg")
                 .args(["show", name])
                 .output();
             match output {
                 Ok(o) if o.status.success() => {
-                    String::from_utf8_lossy(&o.stdout).contains("latest handshake")
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    if stdout.contains("latest handshake") {
+                        return true;
+                    }
+                    if stdout.contains("endpoint:") && stdout.contains("transfer:") {
+                        return true;
+                    }
+                    false
                 }
                 _ => false,
             }
         }
-        _ => false,
     }
 }
 

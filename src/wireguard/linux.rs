@@ -198,10 +198,28 @@ pub fn check_tunnel(wg_ip: &str) -> bool {
     let name = iface_name(wg_ip);
 
     let try_wg = |cmd: &mut std::process::Command| -> bool {
-        match cmd.args(["show", name]).output() {
+        match cmd.args(["show", &name]).output() {
             Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout).contains("latest handshake")
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                if stdout.contains("latest handshake") {
+                    return true;
+                }
+                if stdout.contains(&format!("allowed ips: {}/32", wg_ip)) {
+                    if stdout.contains("endpoint:") && stdout.contains("transfer:") {
+                        return true;
+                    }
+                }
+                false
             }
+            _ => false,
+        }
+    };
+
+    if try_wg(&mut Command::new("sudo").arg("wg")) {
+        return true;
+    }
+    try_wg(&mut Command::new("wg"))
+}
             _ => false,
         }
     };
