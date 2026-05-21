@@ -80,15 +80,15 @@ fn configure_standard(
 
     let config = format!(
         "[Interface]\n\
-         PrivateKey = {}\n\
-         Address = {}/24\n\
-         DNS = {}\n\
-         \n\
-         [Peer]\n\
-         PublicKey = {}\n\
-         Endpoint = {}\n\
-         AllowedIPs = 10.8.0.0/24\n\
-         PersistentKeepalive = 25\n",
+PrivateKey = {}\n\
+Address = {}/24\n\
+DNS = {}\n\
+\n\
+[Peer]\n\
+PublicKey = {}\n\
+Endpoint = {}\n\
+AllowedIPs = 10.8.0.0/24\n\
+PersistentKeepalive = 25\n",
         private_key,
         wg_ip,
         dns.unwrap_or("1.1.1.1"),
@@ -97,14 +97,14 @@ fn configure_standard(
     );
 
     let cfg_file = wg_dir.join(format!("{}.conf", name));
-    fs::write(&cfg_file, &config)?;
+    fs::write(&cfg_file, config)?;
 
-    let _ = Command::new("wg-quick")
-        .args(["down", name])
+    let _ = Command::new("sudo")
+        .args(["wg-quick", "down", name])
         .output();
 
-    let output = Command::new("wg-quick")
-        .args(["up", name])
+    let output = Command::new("sudo")
+        .args(["wg-quick", "up", name])
         .output()?;
 
     if !output.status.success() {
@@ -122,15 +122,15 @@ fn configure_atomic(
 
     let config = format!(
         "[Interface]\n\
-         PrivateKey = {}\n\
-         Address = {}/24\n\
-         DNS = {}\n\
-         \n\
-         [Peer]\n\
-         PublicKey = {}\n\
-         Endpoint = {}\n\
-         AllowedIPs = 10.8.0.0/24\n\
-         PersistentKeepalive = 25\n",
+PrivateKey = {}\n\
+Address = {}/24\n\
+DNS = {}\n\
+\n\
+[Peer]\n\
+PublicKey = {}\n\
+Endpoint = {}\n\
+AllowedIPs = 10.8.0.0/24\n\
+PersistentKeepalive = 25\n",
         private_key,
         wg_ip,
         dns.unwrap_or("1.1.1.1"),
@@ -209,31 +209,23 @@ fn bring_up_manual(name: &str, wg_ip: &str, server_public_key: &str, endpoint: &
         bail!("Failed to create WireGuard interface {}", name);
     }
 
+    let tmp_key = format!("/tmp/{}_privatekey", name);
+    let conf = fs::read_to_string(format!("/etc/wireguard/{}.conf", name))?;
+    let pk = conf.lines()
+        .find(|l| l.trim().starts_with("PrivateKey"))
+        .and_then(|l| l.splitn(2, '=').nth(1))
+        .map(|v| v.trim())
+        .unwrap_or("");
+    fs::write(&tmp_key, pk)?;
+
     let status = Command::new("sudo")
-        .args(["wg", "set", name,
-               "private-key", &format!("/etc/wireguard/{}.conf", name)])
-        .status();
-    let status = if status.as_ref().is_err() || !status.as_ref().unwrap().success() {
-        let tmp_key = format!("/tmp/{}_privatekey", name);
-        let conf = fs::read_to_string(format!("/etc/wireguard/{}.conf", name))?;
-        let pk = conf.lines()
-            .find(|l| l.trim().starts_with("PrivateKey"))
-            .and_then(|l| l.split('=').nth(1))
-            .map(|v| v.trim())
-            .unwrap_or("");
-        fs::write(&tmp_key, pk)?;
-        let s = Command::new("sudo")
-            .args(["wg", "set", name, "private-key", &tmp_key,
-                   "peer", server_public_key,
-                   "endpoint", endpoint,
-                   "allowed-ips", "10.8.0.0/24",
-                   "persistent-keepalive", "25"])
-            .status()?;
-        let _ = Command::new("rm").arg(&tmp_key).status();
-        s
-    } else {
-        status.unwrap()
-    };
+        .args(["wg", "set", name, "private-key", &tmp_key,
+               "peer", server_public_key,
+               "endpoint", endpoint,
+               "allowed-ips", "10.8.0.0/24",
+               "persistent-keepalive", "25"])
+        .status()?;
+    let _ = Command::new("sudo").args(["rm", "-f", &tmp_key]).status();
     if !status.success() {
         bail!("Failed to configure WireGuard interface {}", name);
     }
@@ -307,17 +299,19 @@ fn configure_via_distrobox(name: &str, config: &str) -> Result<()> {
 pub fn check_tunnel(wg_ip: &str) -> bool {
     let name = iface_name(wg_ip);
 
-    let output = match Command::new("wg").args(["show", &name]).output() {
-        Ok(o) => o,
-        Err(_) => return false,
+    let try_wg = |cmd: &mut std::process::Command| -> bool {
+        match cmd.args(["show", &name]).output() {
+            Ok(o) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout).contains("latest handshake")
+            }
+            _ => false,
+        }
     };
 
-    if !output.status.success() {
-        return false;
+    if try_wg(&mut Command::new("sudo").arg("wg")) {
+        return true;
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.contains("latest handshake")
+    try_wg(&mut Command::new("wg"))
 }
 
 pub fn ensure_tunnel(wg_ip: &str) -> Result<()> {
@@ -361,19 +355,19 @@ pub fn ensure_tunnel(wg_ip: &str) -> Result<()> {
             let conf = fs::read_to_string(&conf_path)?;
             let private_key = conf.lines()
                 .find(|l| l.trim().starts_with("PrivateKey"))
-                .and_then(|l| l.split('=').nth(1))
+                .and_then(|l| l.splitn(2, '=').nth(1))
                 .map(|v| v.trim().to_string())
                 .unwrap_or_default();
 
             let server_public_key = conf.lines()
                 .find(|l| l.trim().starts_with("PublicKey"))
-                .and_then(|l| l.split('=').nth(1))
+                .and_then(|l| l.splitn(2, '=').nth(1))
                 .map(|v| v.trim().to_string())
                 .unwrap_or_default();
 
             let endpoint = conf.lines()
                 .find(|l| l.trim().starts_with("Endpoint"))
-                .and_then(|l| l.split('=').nth(1))
+                .and_then(|l| l.splitn(2, '=').nth(1))
                 .map(|v| v.trim().to_string())
                 .unwrap_or_default();
 
