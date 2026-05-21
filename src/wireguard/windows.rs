@@ -19,22 +19,37 @@ pub fn configure(provision: &ProvisionResponse) -> Result<()> {
 
     fs::create_dir_all(&wg_dir)?;
 
+    let peer_section = if let Some(psk) = provision.preshared_key.as_deref() {
+        format!(
+            "[Peer]\n\
+             PublicKey = {}\n\
+             PresharedKey = {}\n\
+             Endpoint = {}\n\
+             AllowedIPs = 10.8.0.0/24\n\
+             PersistentKeepalive = 25\n",
+            server_public_key, psk, endpoint
+        )
+    } else {
+        format!(
+            "[Peer]\n\
+             PublicKey = {}\n\
+             Endpoint = {}\n\
+             AllowedIPs = 10.8.0.0/24\n\
+             PersistentKeepalive = 25\n",
+            server_public_key, endpoint
+        )
+    };
     let config = format!(
         "[Interface]\n\
-PrivateKey = {}\n\
-Address = {}/24\n\
-DNS = {}\n\
-\n\
-[Peer]\n\
-PublicKey = {}\n\
-Endpoint = {}\n\
-AllowedIPs = 10.8.0.0/24\n\
-PersistentKeepalive = 25\n",
+         PrivateKey = {}\n\
+         Address = {}/24\n\
+         DNS = {}\n\
+         \n\
+         {}",
         private_key,
         wg_ip,
         provision.dns.as_deref().unwrap_or("1.1.1.1"),
-        server_public_key,
-        endpoint
+        peer_section
     );
 
     let name = "wg0";

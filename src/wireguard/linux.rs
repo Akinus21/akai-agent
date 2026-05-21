@@ -74,10 +74,10 @@ pub fn configure(provision: &ProvisionResponse) -> Result<()> {
 
     let name = iface_name(wg_ip);
 
-    write_config(name, private_key, wg_ip, server_public_key, endpoint, provision.dns.as_deref())?;
+    write_config(name, private_key, wg_ip, server_public_key, endpoint, provision.dns.as_deref(), provision.preshared_key.as_deref())?;
 
     if use_manual_wg() {
-        bring_up_manual(name, wg_ip, server_public_key, endpoint)?;
+        bring_up_manual(name, wg_ip, server_public_key, endpoint, provision.preshared_key.as_deref())?;
     } else {
         let _ = Command::new("sudo")
             .args(["wg-quick", "down", name])
@@ -96,23 +96,39 @@ pub fn configure(provision: &ProvisionResponse) -> Result<()> {
 fn write_config(
     name: &str, private_key: &str, wg_ip: &str,
     server_public_key: &str, endpoint: &str, dns: Option<&str>,
+    preshared_key: Option<&str>,
 ) -> Result<()> {
+    let peer_section = if let Some(psk) = preshared_key {
+        format!(
+            "[Peer]\n\
+             PublicKey = {}\n\
+             PresharedKey = {}\n\
+             Endpoint = {}\n\
+             AllowedIPs = 10.8.0.0/24\n\
+             PersistentKeepalive = 25\n",
+            server_public_key, psk, endpoint
+        )
+    } else {
+        format!(
+            "[Peer]\n\
+             PublicKey = {}\n\
+             Endpoint = {}\n\
+             AllowedIPs = 10.8.0.0/24\n\
+             PersistentKeepalive = 25\n",
+            server_public_key, endpoint
+        )
+    };
     let config = format!(
         "[Interface]\n\
-PrivateKey = {}\n\
-Address = {}/24\n\
-DNS = {}\n\
-\n\
-[Peer]\n\
-PublicKey = {}\n\
-Endpoint = {}\n\
-AllowedIPs = 10.8.0.0/24\n\
-PersistentKeepalive = 25\n",
+         PrivateKey = {}\n\
+         Address = {}/24\n\
+         DNS = {}\n\
+         \n\
+         {}",
         private_key,
         wg_ip,
         dns.unwrap_or("1.1.1.1"),
-        server_public_key,
-        endpoint
+        peer_section
     );
 
     let wg_dir = Path::new("/etc/wireguard");
@@ -147,7 +163,7 @@ PersistentKeepalive = 25\n",
     Ok(())
 }
 
-fn bring_up_manual(name: &str, wg_ip: &str, server_public_key: &str, endpoint: &str) -> Result<()> {
+fn bring_up_manual(name: &str, wg_ip: &str, server_public_key: &str, endpoint: &str, preshared_key: Option<&str>) -> Result<()> {
     let _ = Command::new("sudo")
         .args(["ip", "link", "del", name])
         .output();
@@ -168,14 +184,27 @@ fn bring_up_manual(name: &str, wg_ip: &str, server_public_key: &str, endpoint: &
         .unwrap_or("");
     fs::write(&tmp_key, pk)?;
 
-    let status = Command::new("sudo")
-        .arg("wg").arg("set").arg(name).arg("private-key").arg(&tmp_key)
+    let mut cmd = Command::new("sudo");
+    cmd.arg("wg").arg("set").arg(name).arg("private-key").arg(&tmp_key)
         .arg("peer").arg(server_public_key)
         .arg("endpoint").arg(endpoint)
         .arg("allowed-ips").arg("10.8.0.0/24")
-        .arg("persistent-keepalive").arg("25")
-        .status()?;
+        .arg("persistent-keepalive").arg("25");
+
+    let tmp_psk = if let Some(psk) = preshared_key {
+        let path = format!("/tmp/{}_presharedkey", name);
+        fs::write(&path, psk)?;
+        cmd.arg("preshared-key").arg(&path);
+        Some(path)
+    } else {
+        None
+    };
+
+    let status = cmd.status()?;
     let _ = Command::new("sudo").arg("rm").arg("-f").arg(&tmp_key).status();
+    if let Some(ref psk_path) = tmp_psk {
+        let _ = Command::new("sudo").arg("rm").arg("-f").arg(psk_path).status();
+    }
     if !status.success() {
         bail!("Failed to configure WireGuard interface {}", name);
     }
@@ -239,7 +268,7 @@ pub fn ensure_tunnel(wg_ip: &str) -> Result<()> {
         None
     };
 
-    let parse_conf = |c: &str| -> (String, String, String) {
+    let parse_conf = |c: &str| -> (String, String, String, Option<String>) {
         let pk = c.lines()
             .find(|l| l.trim().starts_with("PrivateKey"))
             .and_then(|l| l.splitn(2, '=').nth(1))
@@ -255,17 +284,22 @@ pub fn ensure_tunnel(wg_ip: &str) -> Result<()> {
             .and_then(|l| l.splitn(2, '=').nth(1))
             .map(|v| v.trim().to_string())
             .unwrap_or_default();
-        (pk, spk, ep)
+        let psk = c.lines()
+            .find(|l| l.trim().starts_with("PresharedKey"))
+            .and_then(|l| l.splitn(2, '=').nth(1))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        (pk, spk, ep, psk)
     };
 
     if use_manual_wg() {
         if let Some(ref c) = conf {
-            let (_, server_public_key, endpoint) = parse_conf(c);
+            let (_, server_public_key, endpoint, preshared_key) = parse_conf(c);
             if !server_public_key.is_empty() && !endpoint.is_empty() {
                 let _ = Command::new("sudo")
                     .args(["ip", "link", "del", name])
                     .output();
-                bring_up_manual(name, wg_ip, &server_public_key, &endpoint)?;
+                bring_up_manual(name, wg_ip, &server_public_key, &endpoint, preshared_key.as_deref())?;
                 println!("WireGuard tunnel configured (manual)");
                 return Ok(());
             }
@@ -289,12 +323,12 @@ pub fn ensure_tunnel(wg_ip: &str) -> Result<()> {
 
     if has_wg() {
         if let Some(ref c) = conf {
-            let (_, server_public_key, endpoint) = parse_conf(c);
+            let (_, server_public_key, endpoint, preshared_key) = parse_conf(c);
             if !server_public_key.is_empty() && !endpoint.is_empty() {
                 let _ = Command::new("sudo")
                     .args(["ip", "link", "del", name])
                     .output();
-                bring_up_manual(name, wg_ip, &server_public_key, &endpoint)?;
+                bring_up_manual(name, wg_ip, &server_public_key, &endpoint, preshared_key.as_deref())?;
                 println!("WireGuard tunnel configured (manual fallback)");
                 return Ok(());
             }

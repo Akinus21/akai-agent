@@ -59,6 +59,8 @@ pub struct ProvisionResponse {
     pub endpoint:            Option<String>,
     pub dns:                 Option<String>,
     pub allowed_ips:         Option<String>,
+    #[serde(alias = "wg_preshared_key")]
+    pub preshared_key:       Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
