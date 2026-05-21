@@ -15,35 +15,12 @@ pub async fn configure(provision: &ProvisionResponse) -> Result<()> {
 }
 
 pub fn check_tunnel(wg_ip: &str) -> bool {
-    let name = format!("wg{}", wg_ip.rsplitn(2, '.').last().unwrap_or("1"));
-    let output = match std::process::Command::new("sudo")
-        .args(["wg", "show", &name])
-        .output()
-    {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).contains("latest handshake")
-        }
-        _ => {
-            match std::process::Command::new("wg")
-                .args(["show", &name])
-                .output()
-            {
-                Ok(o) if o.status.success() => {
-                    String::from_utf8_lossy(&o.stdout).contains("latest handshake")
-                }
-                _ => false,
-            }
-        }
-    };
-    output
-}
-                _ => false,
-            }
-        }
-        "windows" => {
+    match std::env::consts::OS {
+        "linux" => linux::check_tunnel(wg_ip),
+        "macos" | "windows" => {
             let name = "wg0";
             let output = std::process::Command::new("wg")
-                .args(["show", &name])
+                .args(["show", name])
                 .output();
             match output {
                 Ok(o) if o.status.success() => {
@@ -63,26 +40,13 @@ pub fn ensure_tunnel(wg_ip: &str) -> Result<()> {
             if check_tunnel(wg_ip) {
                 return Ok(());
             }
-            let name = format!("wg{}", wg_ip.rsplitn(2, '.').last().unwrap_or("1"));
-            eprintln!("WireGuard tunnel is down — attempting to re-establish...");
-            let _ = std::process::Command::new("sudo")
-                .args(["wg-quick", "down", &name])
-                .output();
-            let output = std::process::Command::new("sudo")
-                .args(["wg-quick", "up", &name])
-                .output()?;
-            if !output.status.success() {
-                anyhow::bail!("wg-quick up failed: {}", String::from_utf8_lossy(&output.stderr));
-            }
-            Ok(())
-        }
             let name = "wg0";
             eprintln!("WireGuard tunnel is down — attempting to re-establish...");
             let _ = std::process::Command::new("wg-quick")
-                .args(["down", &name])
+                .args(["down", name])
                 .output();
             let output = std::process::Command::new("wg-quick")
-                .args(["up", &name])
+                .args(["up", name])
                 .output()?;
             if !output.status.success() {
                 anyhow::bail!("wg-quick up failed: {}", String::from_utf8_lossy(&output.stderr));
