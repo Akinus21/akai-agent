@@ -28,7 +28,8 @@ pub fn configure(provision: &ProvisionResponse) -> Result<()> {
          [Peer]\n\
          PublicKey = {}\n\
          Endpoint = {}\n\
-         AllowedIPs = 10.8.0.0/24\n",
+         AllowedIPs = 10.8.0.0/24\n\
+         PersistentKeepalive = 25\n",
         private_key,
         wg_ip,
         provision.dns.as_deref().unwrap_or("1.1.1.1"),

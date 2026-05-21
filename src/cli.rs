@@ -140,6 +140,13 @@ mod handlers {
         println!("  WireGuard: {}", cfg.wg_ip);
         println!("  RPC port:  {}", cfg.rpc_port);
 
+        println!("Verifying WireGuard tunnel...");
+        if !wireguard::check_tunnel(&cfg.wg_ip) {
+            eprintln!("  WireGuard tunnel is down — re-establishing...");
+            wireguard::ensure_tunnel(&cfg.wg_ip)
+                .context("Failed to establish WireGuard tunnel. RPC workers will be unreachable.")?;
+        }
+
         let client = QueueClient::new(&cfg.queue_url, &cfg.api_key);
 
         {
@@ -161,13 +168,27 @@ mod handlers {
         println!("rpc-server running on 0.0.0.0:{}", cfg.rpc_port);
 
         let mut heartbeat_tick  = tokio::time::interval(Duration::from_secs(30));
+        let mut tunnel_tick     = tokio::time::interval(Duration::from_secs(120));
         let mut update_tick     = tokio::time::interval(Duration::from_secs(86400));
         heartbeat_tick.tick().await;
+        tunnel_tick.tick().await;
         update_tick.tick().await;
 
         loop {
             tokio::select! {
                 _ = heartbeat_tick.tick() => {
+                    if !wireguard::check_tunnel(&cfg.wg_ip) {
+                        eprintln!("WireGuard tunnel is down — pausing heartbeats until re-established");
+                        match wireguard::ensure_tunnel(&cfg.wg_ip) {
+                            Ok(()) => println!("WireGuard tunnel re-established — resuming"),
+                            Err(e) => {
+                                eprintln!("Cannot re-establish tunnel: {e}");
+                                eprintln!("Workers will be unreachable. Will retry next cycle.");
+                                continue;
+                            }
+                        }
+                    }
+
                     if matches!(child.try_wait(), Ok(Some(_))) {
                         eprintln!("rpc-server exited — respawning...");
                         child = rpc::spawn_rpc_server(&rpc_path, cfg.rpc_port)?;
@@ -187,6 +208,16 @@ mod handlers {
                             ).await;
                         }
                         Err(e) => eprintln!("Heartbeat failed: {e}"),
+                    }
+                }
+
+                _ = tunnel_tick.tick() => {
+                    if !wireguard::check_tunnel(&cfg.wg_ip) {
+                        eprintln!("Periodic check: WireGuard tunnel is down");
+                        match wireguard::ensure_tunnel(&cfg.wg_ip) {
+                            Ok(()) => println!("WireGuard tunnel re-established"),
+                            Err(e) => eprintln!("Cannot re-establish tunnel: {e}"),
+                        }
                     }
                 }
 
