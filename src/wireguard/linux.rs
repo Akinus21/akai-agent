@@ -196,7 +196,7 @@ pub fn check_tunnel(wg_ip: &str) -> bool {
     let name = iface_name(wg_ip);
 
     let try_wg = |cmd: &mut std::process::Command| -> bool {
-        match cmd.args(["show", &name]).output() {
+        match cmd.args(["show", name.as_str()]).output() {
             Ok(o) if o.status.success() => {
                 String::from_utf8_lossy(&o.stdout).contains("latest handshake")
             }
