@@ -214,7 +214,7 @@ fn bring_up_manual(name: &str, wg_ip: &str, server_public_key: &str, endpoint: &
         .args(["wg", "set", name,
                "private-key", "/etc/wireguard/{}.conf"])
         .status();
-    let status = if status.is_err() || !status.unwrap().success() {
+    let status = if status.as_ref().is_err() || !status.as_ref().unwrap().success() {
         let tmp_key = format!("/tmp/{}_privatekey", name);
         let conf = fs::read_to_string(format!("/etc/wireguard/{}.conf", name))?;
         let pk = conf.lines()
