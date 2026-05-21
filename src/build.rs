@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const LLAMA_CPP_REPO: &str = "https://github.com/ggml-org/llama.cpp.git";
+const LLAMA_CPP_VERSION: &str = "master-a8681a0";
 
 const HOMEBREW_PATHS: &[&str] = &[
     "/home/linuxbrew/.linuxbrew/bin",
@@ -438,8 +439,9 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
     let build_cmd = format!(
         "export PATH=/usr/local/cuda-{maj}.{min}/bin:$PATH && \
          if [ ! -d '{src}/.git' ]; then \
-           git clone --depth 1 {repo} '{src}'; \
+           git clone --depth 1 --branch {version} {repo} '{src}'; \
          fi && \
+         cd '{src}' && git fetch origin {version} && git checkout {version} && \
          mkdir -p '{src}/build' && \
          cd '{src}/build' && \
          for libdir in /run/host/usr/lib/x86_64-linux-gnu /run/host/usr/lib64 /run/host/lib/x86_64-linux-gnu /run/host/lib64 /usr/lib/x86_64-linux-gnu; do \
@@ -468,6 +470,7 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
         maj = cuda_major, min = cuda_minor,
         src = llama_src,
         repo = LLAMA_CPP_REPO,
+        version = LLAMA_CPP_VERSION,
         cmake_args = cmake_args,
         data = data_path
     );
@@ -737,7 +740,7 @@ pub fn build_from_source() -> Result<PathBuf> {
     if !src.exists() {
         println!("  Cloning llama.cpp repository...");
         let status = Command::new(&git)
-            .args(["clone", "--depth", "1", LLAMA_CPP_REPO, &src.to_string_lossy()])
+            .args(["clone", "--depth", "1", "--branch", LLAMA_CPP_VERSION, LLAMA_CPP_REPO, &src.to_string_lossy()])
             .env("PATH", &env_path)
             .status()
             .context("Failed to run git clone")?;
@@ -745,9 +748,13 @@ pub fn build_from_source() -> Result<PathBuf> {
             bail!("git clone failed");
         }
     } else {
-        println!("  Updating llama.cpp repository...");
+        println!("  Checking out llama.cpp {}...", LLAMA_CPP_VERSION);
         let _ = Command::new(&git)
-            .args(["-C", &src.to_string_lossy(), "pull", "--ff-only"])
+            .args(["-C", &src.to_string_lossy(), "fetch", "origin", LLAMA_CPP_VERSION])
+            .env("PATH", &env_path)
+            .status();
+        let _ = Command::new(&git)
+            .args(["-C", &src.to_string_lossy(), "checkout", LLAMA_CPP_VERSION])
             .env("PATH", &env_path)
             .status();
     }
