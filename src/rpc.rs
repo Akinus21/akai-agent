@@ -83,6 +83,34 @@ pub fn current_version() -> String {
         .unwrap_or_default()
 }
 
+pub fn rpc_commit_hash() -> String {
+    let cfg_version = current_version();
+    if let Some(commit) = cfg_version.split('-').next() {
+        if !commit.is_empty() {
+            return commit.to_string();
+        }
+    }
+    let path = rpc_binary_path();
+    if !path.exists() {
+        return String::new();
+    }
+    match std::process::Command::new(&path)
+        .arg("--version")
+        .output()
+    {
+        Ok(output) => {
+            let ver_output = String::from_utf8_lossy(&output.stderr);
+            for part in ver_output.split(|c: char| !c.is_ascii_hexdigit()) {
+                if part.len() >= 7 {
+                    return part.to_string();
+                }
+            }
+            String::new()
+        }
+        Err(_) => String::new(),
+    }
+}
+
 pub async fn ensure_rpc_server() -> Result<PathBuf> {
     let path = rpc_binary_path();
     let lib_dir = crate::config::data_dir().join("lib");

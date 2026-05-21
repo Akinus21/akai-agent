@@ -512,7 +512,7 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
 
     let cuda_label = if has_nvcc { "source-cuda" } else { "source-cpu" };
     if let Ok(mut cfg) = crate::config::load_config() {
-        cfg.rpc_version = cuda_label.to_string();
+        cfg.rpc_version = format!("{}-{}", LLAMA_CPP_VERSION, cuda_label);
         cfg.rpc_binary = bin.to_string_lossy().to_string();
         let _ = crate::config::save_config(&cfg);
     }
@@ -830,7 +830,7 @@ pub fn build_from_source() -> Result<PathBuf> {
     let cuda_enabled = nvcc_available;
 
     if let Ok(mut cfg) = crate::config::load_config() {
-        cfg.rpc_version = if cuda_enabled { "source-cuda" } else { "source-cpu" }.to_string();
+        cfg.rpc_version = format!("{}-{}", LLAMA_CPP_VERSION, if cuda_enabled { "source-cuda" } else { "source-cpu" });
         cfg.rpc_binary = bin.to_string_lossy().to_string();
         let _ = crate::config::save_config(&cfg);
     }

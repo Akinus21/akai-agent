@@ -49,6 +49,12 @@ struct HeartbeatRequest {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct HeartbeatResponse {
+    #[serde(default)]
+    pub hub_commit: String,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct ProvisionResponse {
     #[serde(alias = "wg_private_key")]
     pub private_key:         Option<String>,
@@ -192,7 +198,7 @@ impl QueueClient {
 
     pub async fn heartbeat(
         &self, worker_id: &str, gpu: bool, vram_gb: f64, rpc_port: u16,
-    ) -> Result<()> {
+    ) -> Result<HeartbeatResponse> {
         let body = serde_json::to_vec(&HeartbeatRequest { gpu, vram_gb, rpc_port, alive: true, models: Vec::new() })?;
         let path = format!("/workers/{}/heartbeat", worker_id);
         let headers = self.auth_headers("POST", &path, &body)?;
@@ -209,7 +215,7 @@ impl QueueClient {
         if !resp.status().is_success() {
             bail!("heartbeat failed: {} — {}", resp.status(), resp.text().await?);
         }
-        Ok(())
+        Ok(resp.json().await?)
     }
 
     pub async fn deregister(&self, worker_id: &str) -> Result<()> {

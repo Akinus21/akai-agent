@@ -147,7 +147,7 @@ mod handlers {
     }
 
     pub async fn start() -> Result<()> {
-        let cfg = config::load_config()
+        let mut cfg = config::load_config()
             .context("Config not found. Run `akai-agent init` first.")?;
 
         println!("Starting akai-agent");
@@ -176,7 +176,7 @@ mod handlers {
             });
         }
 
-        let rpc_path = rpc::ensure_rpc_server().await
+        let mut rpc_path = rpc::ensure_rpc_server().await
             .context("rpc-server binary not found")?;
 
         let mut child = rpc::spawn_rpc_server(&rpc_path, cfg.rpc_port)
@@ -214,7 +214,30 @@ mod handlers {
                     match client.heartbeat(
                         &cfg.worker_id, cfg.gpu, cfg.vram_gb, cfg.rpc_port
                     ).await {
-                        Ok(_) => tracing::info!("Heartbeat OK"),
+                        Ok(resp) => {
+                            tracing::info!("Heartbeat OK");
+                            let my_commit = rpc::rpc_commit_hash();
+                            if !resp.hub_commit.is_empty() && !my_commit.is_empty() && my_commit != resp.hub_commit {
+                                eprintln!("Hub commit mismatch: hub={}, local={}. Rebuilding rpc-server...", resp.hub_commit, my_commit);
+                                child.kill().ok();
+                                child.wait().ok();
+                                let old_binary = std::path::PathBuf::from(&cfg.rpc_binary);
+                                if old_binary.exists() {
+                                    let _ = std::fs::remove_file(&old_binary);
+                                }
+                                match rpc::ensure_rpc_server().await {
+                                    Ok(new_path) => {
+                                        rpc_path = new_path;
+                                        if let Ok(new_cfg) = crate::config::load_config() {
+                                            cfg = new_cfg;
+                                        }
+                                        child = rpc::spawn_rpc_server(&rpc_path, cfg.rpc_port)?;
+                                        println!("rpc-server rebuilt and restarted (hub commit: {})", resp.hub_commit);
+                                    }
+                                    Err(e) => eprintln!("Rebuild failed: {e}"),
+                                }
+                            }
+                        }
                         Err(e) if is_not_found(&e) => {
                             eprintln!("Not in registry — re-registering...");
                             let _ = client.register(
