@@ -15,6 +15,10 @@ pub struct Config {
     pub vram_gb:     f64,
     pub rpc_binary:  String,
     pub rpc_version: String,
+    #[serde(default)]
+    pub username:    String,
+    #[serde(default)]
+    pub public_key:  String,
 }
 
 pub fn config_path() -> PathBuf {
@@ -28,6 +32,18 @@ pub fn data_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("akai-agent")
+}
+
+pub fn key_dir() -> PathBuf {
+    data_dir()
+}
+
+pub fn private_key_path() -> PathBuf {
+    key_dir().join("id_akai")
+}
+
+pub fn public_key_path() -> PathBuf {
+    key_dir().join("id_akai.pub")
 }
 
 pub fn save_config(config: &Config) -> Result<()> {

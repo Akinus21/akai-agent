@@ -16,7 +16,7 @@ pub enum Commands {
         queue: String,
 
         #[arg(long)]
-        key: String,
+        username: String,
 
         #[arg(long)]
         name: Option<String>,
@@ -37,8 +37,8 @@ pub enum Commands {
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Init { queue, key, name, rpc_port } =>
-            handlers::init(&queue, &key, name, rpc_port).await,
+        Commands::Init { queue, username, name, rpc_port } =>
+            handlers::init(&queue, &username, name, rpc_port).await,
         Commands::Start      => handlers::start().await,
         Commands::Install    => handlers::install().await,
         Commands::Status     => handlers::status().await,
@@ -49,11 +49,11 @@ pub async fn run() -> anyhow::Result<()> {
 mod handlers {
     use anyhow::{Context, Result};
     use std::time::Duration;
-    use crate::{config, gpu, queue_client::QueueClient, rpc, wireguard};
+    use crate::{auth, config, gpu, queue_client::QueueClient, rpc, wireguard};
 
     pub async fn init(
         queue_url: &str,
-        api_key:   &str,
+        username:  &str,
         name:      Option<String>,
         rpc_port:  u16,
     ) -> Result<()> {
@@ -65,6 +65,8 @@ mod handlers {
 
         println!("Initializing akai-agent as \"{}\"", worker_name);
 
+        let (_, public_key) = auth::ensure_keypair()?;
+
         let gpu_info = gpu::detect_gpu();
         if gpu_info.has_gpu {
             println!("GPU: {} ({:.1} GB VRAM)", gpu_info.name, gpu_info.vram_gb);
@@ -72,15 +74,28 @@ mod handlers {
             println!("No GPU detected (CPU-only worker)");
         }
 
-        let client = QueueClient::new(queue_url, api_key);
-        println!("Requesting WireGuard peer from {}...", queue_url);
-        let provision = client.provision(&worker_name).await
-            .context("Failed to provision WireGuard peer")?;
+        let client = QueueClient::new(queue_url, username);
+        println!("Authenticating as '{}' with queue at {}...", username, queue_url);
+
+        let provision = match client.auth_register(&worker_name, &public_key).await {
+            Ok(p) => {
+                println!("Authenticated with existing key.");
+                p
+            }
+            Err(e) if e.to_string().starts_with("AUTH_REQUIRED:") => {
+                println!("New worker — PAM authentication required (Duo 2FA may trigger).");
+                let password = auth::prompt_password()?;
+                client.auth_login(&worker_name, &public_key, &password).await
+                    .context("Authentication failed")?
+            }
+            Err(e) => return Err(e),
+        };
+
         let wg_ip = provision.wg_ip.as_ref()
             .context("wg_ip missing from provision response")?;
         let peer_id = provision.peer_id.as_ref()
             .context("peer_id missing from provision response")?;
-        println!("Assigned WireGuard IP: {}", wg_ip);
+        println!("Authenticated. Assigned WireGuard IP: {}", wg_ip);
 
         println!("Configuring WireGuard...");
         wireguard::configure(&provision).await
@@ -109,7 +124,7 @@ mod handlers {
 
         let cfg = config::Config {
             queue_url:   queue_url.to_string(),
-            api_key:     api_key.to_string(),
+            api_key:     String::new(),
             worker_id:   worker_id.clone(),
             worker_name: worker_name.clone(),
             wg_ip:       wg_ip.clone(),
@@ -119,6 +134,8 @@ mod handlers {
             vram_gb:     gpu_info.vram_gb,
             rpc_binary:  rpc_path.to_string_lossy().to_string(),
             rpc_version,
+            username:    username.to_string(),
+            public_key,
         };
         config::save_config(&cfg)?;
         println!("Config saved to {}", config::config_path().display());
@@ -147,7 +164,7 @@ mod handlers {
                 .context("Failed to establish WireGuard tunnel. RPC workers will be unreachable.")?;
         }
 
-        let client = QueueClient::new(&cfg.queue_url, &cfg.api_key);
+        let client = QueueClient::from_config(&cfg);
 
         {
             let client  = client.clone();
@@ -249,7 +266,7 @@ mod handlers {
     pub async fn status() -> Result<()> {
         let cfg = config::load_config()
             .context("Config not found. Run `akai-agent init` first.")?;
-        let client = QueueClient::new(&cfg.queue_url, &cfg.api_key);
+        let client = QueueClient::from_config(&cfg);
         match client.get_worker(&cfg.worker_id).await {
             Ok(info) => {
                 println!("Worker:    {}", cfg.worker_id);

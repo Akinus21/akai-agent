@@ -1,3 +1,4 @@
+mod auth;
 mod build;
 mod cli;
 mod config;
