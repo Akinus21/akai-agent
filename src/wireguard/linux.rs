@@ -5,8 +5,8 @@ use std::process::Command;
 use std::time::Duration;
 use crate::queue_client::ProvisionResponse;
 
-fn iface_name(_wg_ip: &str) -> String {
-    "wg0".to_string()
+fn iface_name(_wg_ip: &str) -> &'static str {
+    "wg0"
 }
 
 fn is_ostree() -> bool {
@@ -74,10 +74,10 @@ pub fn configure(provision: &ProvisionResponse) -> Result<()> {
 
     let name = iface_name(wg_ip);
 
-    write_config(&name, private_key, wg_ip, server_public_key, endpoint, provision.dns.as_deref())?;
+    write_config(name, private_key, wg_ip, server_public_key, endpoint, provision.dns.as_deref())?;
 
     if use_manual_wg() {
-        bring_up_manual(&name, wg_ip, server_public_key, endpoint)?;
+        bring_up_manual(name, wg_ip, server_public_key, endpoint)?;
     } else {
         let _ = Command::new("sudo")
             .args(["wg-quick", "down", name])
@@ -118,8 +118,9 @@ PersistentKeepalive = 25\n",
     let wg_dir = Path::new("/etc/wireguard");
     if !wg_dir.exists() {
         if can_sudo() {
+            let wg_dir_s = wg_dir.to_string_lossy();
             let _ = Command::new("sudo")
-                .args(["mkdir", "-p", &wg_dir.to_string_lossy()])
+                .args(["mkdir", "-p", &*wg_dir_s])
                 .status();
         }
         if !wg_dir.exists() {
@@ -131,8 +132,9 @@ PersistentKeepalive = 25\n",
     if can_sudo() {
         let tmp = format!("/tmp/{}.conf", name);
         fs::write(&tmp, &config)?;
+        let cfg_file_s = cfg_file.to_string_lossy();
         let status = Command::new("sudo")
-            .args(["cp", &tmp, &cfg_file.to_string_lossy()])
+            .args(["cp", &*tmp, &*cfg_file_s])
             .status()?;
         let _ = Command::new("rm").arg(&tmp).status();
         if !status.success() {
@@ -167,13 +169,13 @@ fn bring_up_manual(name: &str, wg_ip: &str, server_public_key: &str, endpoint: &
     fs::write(&tmp_key, pk)?;
 
     let status = Command::new("sudo")
-        .args(["wg", "set", name, "private-key", &tmp_key,
-               "peer", server_public_key,
-               "endpoint", endpoint,
-               "allowed-ips", "10.8.0.0/24",
-               "persistent-keepalive", "25"])
+        .arg("wg").arg("set").arg(name).arg("private-key").arg(&tmp_key)
+        .arg("peer").arg(server_public_key)
+        .arg("endpoint").arg(endpoint)
+        .arg("allowed-ips").arg("10.8.0.0/24")
+        .arg("persistent-keepalive").arg("25")
         .status()?;
-    let _ = Command::new("sudo").args(["rm", "-f", &tmp_key]).status();
+    let _ = Command::new("sudo").arg("rm").arg("-f").arg(&tmp_key).status();
     if !status.success() {
         bail!("Failed to configure WireGuard interface {}", name);
     }
@@ -196,7 +198,7 @@ pub fn check_tunnel(wg_ip: &str) -> bool {
     let name = iface_name(wg_ip);
 
     let try_wg = |cmd: &mut std::process::Command| -> bool {
-        match cmd.args(["show", name.as_str()]).output() {
+        match cmd.args(["show", name]).output() {
             Ok(o) if o.status.success() => {
                 String::from_utf8_lossy(&o.stdout).contains("latest handshake")
             }
@@ -251,9 +253,9 @@ pub fn ensure_tunnel(wg_ip: &str) -> Result<()> {
             let (_, server_public_key, endpoint) = parse_conf(c);
             if !server_public_key.is_empty() && !endpoint.is_empty() {
                 let _ = Command::new("sudo")
-                    .args(["ip", "link", "del", &name])
+                    .args(["ip", "link", "del", name])
                     .output();
-                bring_up_manual(&name, wg_ip, &server_public_key, &endpoint)?;
+                bring_up_manual(name, wg_ip, &server_public_key, &endpoint)?;
                 let mut waited = 0u64;
                 while waited < 15 {
                     if check_tunnel(wg_ip) {
@@ -270,10 +272,10 @@ pub fn ensure_tunnel(wg_ip: &str) -> Result<()> {
 
     if has_wg_quick() {
         let _ = Command::new("sudo")
-            .args(["wg-quick", "down", &name])
+            .args(["wg-quick", "down", name])
             .output();
         let output = Command::new("sudo")
-            .args(["wg-quick", "up", &name])
+            .args(["wg-quick", "up", name])
             .output()?;
         if output.status.success() {
             let mut waited = 0u64;
@@ -294,9 +296,9 @@ pub fn ensure_tunnel(wg_ip: &str) -> Result<()> {
             let (_, server_public_key, endpoint) = parse_conf(c);
             if !server_public_key.is_empty() && !endpoint.is_empty() {
                 let _ = Command::new("sudo")
-                    .args(["ip", "link", "del", &name])
+                    .args(["ip", "link", "del", name])
                     .output();
-                bring_up_manual(&name, wg_ip, &server_public_key, &endpoint)?;
+                bring_up_manual(name, wg_ip, &server_public_key, &endpoint)?;
                 let mut waited = 0u64;
                 while waited < 15 {
                     if check_tunnel(wg_ip) {
