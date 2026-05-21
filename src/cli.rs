@@ -83,10 +83,9 @@ mod handlers {
                 p
             }
             Err(e) if e.to_string().starts_with("AUTH_REQUIRED:") => {
-                println!("New worker — PAM authentication required (Duo 2FA may trigger).");
-                let password = auth::prompt_password()?;
-                client.auth_login(&worker_name, &public_key, &password).await
-                    .context("Authentication failed")?
+                println!("New worker — Duo 2FA required.");
+                client.auth_duo(&worker_name, &public_key).await
+                    .context("Duo 2FA failed")?
             }
             Err(e) => return Err(e),
         };

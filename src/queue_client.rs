@@ -19,9 +19,8 @@ struct AuthRegisterRequest<'a> {
 }
 
 #[derive(Serialize)]
-struct AuthLoginRequest<'a> {
+struct AuthDuoRequest<'a> {
     username:    &'a str,
-    password:    &'a str,
     worker_name: &'a str,
     public_key:  &'a str,
 }
@@ -138,26 +137,32 @@ impl QueueClient {
         Ok(resp.json().await?)
     }
 
-    pub async fn auth_login(&self, worker_name: &str, public_key: &str, password: &str) -> Result<ProvisionResponse> {
-        let body = serde_json::to_vec(&AuthLoginRequest {
+    pub async fn auth_duo(&self, worker_name: &str, public_key: &str) -> Result<ProvisionResponse> {
+        let body = serde_json::to_vec(&AuthDuoRequest {
             username: &self.username,
-            password,
             worker_name,
             public_key,
         })?;
 
-        let resp = self.client
-            .post(format!("{}/auth/login", self.base_url))
+        println!("  Duo push sent to {} — check your phone...", self.username);
+
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap();
+
+        let resp = client
+            .post(format!("{}/auth/duo", self.base_url))
             .header("Content-Type", "application/json")
             .body(body)
             .send().await?;
 
         if resp.status() == 401 {
             let detail = resp.text().await.unwrap_or_default();
-            bail!("Authentication failed: {}", detail);
+            bail!("Duo 2FA denied: {}", detail);
         }
         if !resp.status().is_success() {
-            bail!("auth/login failed: {} — {}", resp.status(), resp.text().await?);
+            bail!("auth/duo failed: {} — {}", resp.status(), resp.text().await?);
         }
         Ok(resp.json().await?)
     }

@@ -1,8 +1,6 @@
 use anyhow::{Context, Result};
-use base64::Engine;
 use ed25519_dalek::{SigningKey, Signer, Signature, Verifier};
 use rand::rngs::OsRng;
-use std::io::{self, Write};
 use crate::config;
 
 pub fn generate_keypair() -> Result<(String, String)> {
@@ -106,11 +104,4 @@ pub fn load_public_key() -> Result<String> {
         anyhow::bail!("Public key not found at {}. Run `akai-agent init` first.", pub_path.display());
     }
     Ok(std::fs::read_to_string(&pub_path)?.trim().to_string())
-}
-
-pub fn prompt_password() -> Result<String> {
-    print!("  Password (Duo 2FA may trigger): ");
-    io::stdout().flush()?;
-    let password = rpassword::read_password()?;
-    Ok(password)
 }
