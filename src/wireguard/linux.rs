@@ -204,8 +204,11 @@ pub fn check_tunnel(wg_ip: &str) -> bool {
                 if stdout.contains("latest handshake") {
                     return true;
                 }
+                if stdout.contains("peer:") && stdout.contains("endpoint:") {
+                    return true;
+                }
                 if stdout.contains(&format!("allowed ips: {}/32", wg_ip)) {
-                    if stdout.contains("endpoint:") && stdout.contains("transfer:") {
+                    if stdout.contains("transfer:") {
                         return true;
                     }
                 }
@@ -263,18 +266,11 @@ pub fn ensure_tunnel(wg_ip: &str) -> Result<()> {
                     .args(["ip", "link", "del", name])
                     .output();
                 bring_up_manual(name, wg_ip, &server_public_key, &endpoint)?;
-                let mut waited = 0u64;
-                while waited < 15 {
-                    if check_tunnel(wg_ip) {
-                        println!("WireGuard tunnel re-established");
-                        return Ok(());
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                    waited += 1;
-                }
+                println!("WireGuard tunnel configured (manual)");
+                return Ok(());
             }
         }
-        bail!("Failed to re-establish WireGuard tunnel via manual config. Check network connectivity.");
+        bail!("WireGuard config missing PublicKey or Endpoint.");
     }
 
     if has_wg_quick() {
@@ -285,15 +281,8 @@ pub fn ensure_tunnel(wg_ip: &str) -> Result<()> {
             .args(["wg-quick", "up", name])
             .output()?;
         if output.status.success() {
-            let mut waited = 0u64;
-            while waited < 15 {
-                if check_tunnel(wg_ip) {
-                    println!("WireGuard tunnel re-established");
-                    return Ok(());
-                }
-                std::thread::sleep(Duration::from_secs(1));
-                waited += 1;
-            }
+            println!("WireGuard tunnel configured (wg-quick)");
+            return Ok(());
         }
         eprintln!("wg-quick up failed: {}", String::from_utf8_lossy(&output.stderr));
     }
@@ -306,18 +295,11 @@ pub fn ensure_tunnel(wg_ip: &str) -> Result<()> {
                     .args(["ip", "link", "del", name])
                     .output();
                 bring_up_manual(name, wg_ip, &server_public_key, &endpoint)?;
-                let mut waited = 0u64;
-                while waited < 15 {
-                    if check_tunnel(wg_ip) {
-                        println!("WireGuard tunnel re-established (manual)");
-                        return Ok(());
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                    waited += 1;
-                }
+                println!("WireGuard tunnel configured (manual fallback)");
+                return Ok(());
             }
         }
     }
 
-    bail!("Failed to re-establish WireGuard tunnel for {}. Check WireGuard config and network connectivity.", name)
+    bail!("No WireGuard configuration found at {}.", conf_path)
 }
