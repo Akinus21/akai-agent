@@ -204,7 +204,9 @@ pub fn check_tunnel(wg_ip: &str) -> bool {
         }
     };
 
-    if try_wg(&mut Command::new("sudo").arg("wg")) {
+    let mut sudo_wg = Command::new("sudo");
+    sudo_wg.arg("wg");
+    if try_wg(&mut sudo_wg) {
         return true;
     }
     try_wg(&mut Command::new("wg"))
