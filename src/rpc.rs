@@ -84,12 +84,6 @@ pub fn current_version() -> String {
 }
 
 pub fn rpc_commit_hash() -> String {
-    let cfg_version = current_version();
-    if let Some(commit) = cfg_version.split('-').next() {
-        if !commit.is_empty() {
-            return commit.to_string();
-        }
-    }
     let path = rpc_binary_path();
     if !path.exists() {
         return String::new();
