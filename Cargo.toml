@@ -1,10 +1,6 @@
 [package]
 name = "akai-agent"
-<<<<<<< HEAD
-version = "0.0.56"
-=======
-version = "0.0.56"
->>>>>>> 4a60bf9 (chore: bump version to 0.0.56 [skip ci])
+version = "0.0.57"
 edition = "2021"
 description = "Remote GPU worker agent for the akai-net distributed inference system"
 license = "MIT"
