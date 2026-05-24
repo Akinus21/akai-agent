@@ -144,7 +144,6 @@ impl TunnelClient {
 
         Ok(TlsConnector::from(Arc::new(config)))
     }
-    }
 
     async fn connect_and_serve(&self, connector: &TlsConnector) -> Result<()> {
         let server_host = self.server_host.clone();
