@@ -146,13 +146,18 @@ impl TunnelClient {
         let rpc_port = self.rpc_port;
         let conns = self.conns.clone();
 
+        eprintln!("tunnel: connecting to {}:{}...", server_host, self.server_port);
+
         let domain = ServerName::try_from(server_host.clone())
             .map_err(|e| anyhow::anyhow!("invalid server name: {e}"))?;
 
         let tcp = TcpStream::connect((&*server_host, self.server_port)).await
             .context("TCP connect failed")?;
+        eprintln!("tunnel: TCP connected to {}:{}", server_host, self.server_port);
+
         let tls = connector.connect(domain, tcp).await
             .context("TLS handshake failed")?;
+        eprintln!("tunnel: TLS handshake complete");
 
         let (mut reader, mut writer) = tokio::io::split(tls);
 
