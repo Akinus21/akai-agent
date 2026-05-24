@@ -101,18 +101,21 @@ impl TunnelClient {
     fn build_tls_connector(&self) -> Result<TlsConnector> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mut root_store = RootCertStore::empty();
-        let ca_certs = rustls_pemfile::certs(&mut &self.ca_cert_pem[..])
+        let mut ca_pem = &self.ca_cert_pem[..];
+        let ca_certs = rustls_pemfile::certs(&mut ca_pem)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to parse CA cert")?;
         for cert in ca_certs {
             root_store.add(cert).context("invalid CA cert")?;
         }
 
-        let client_certs = rustls_pemfile::certs(&mut &self.client_cert_pem[..])
+        let mut client_pem = &self.client_cert_pem[..];
+        let client_certs = rustls_pemfile::certs(&mut client_pem)
             .collect::<Result<Vec<_>, _>>()
             .context("failed to parse client cert")?;
 
-        let client_key = rustls_pemfile::private_key(&mut &self.client_key_pem[..])
+        let mut key_pem = &self.client_key_pem[..];
+        let client_key = rustls_pemfile::private_key(&mut key_pem)
             .context("failed to parse client key")?
             .context("no client key in PEM")?;
 
