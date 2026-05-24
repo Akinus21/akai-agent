@@ -27,19 +27,13 @@ pub enum Commands {
 
     TunnelInit {
         #[arg(long)]
-        host: String,
-
-        #[arg(long, default_value = "50053")]
-        port: u16,
+        queue: String,
 
         #[arg(long)]
-        ca_cert: String,
+        username: String,
 
         #[arg(long)]
-        worker_cert: String,
-
-        #[arg(long)]
-        worker_key: String,
+        name: Option<String>,
     },
 
     Start,
@@ -56,8 +50,8 @@ pub async fn run() -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { queue, username, name, rpc_port } =>
             handlers::init(&queue, &username, name, rpc_port).await,
-        Commands::TunnelInit { host, port, ca_cert, worker_cert, worker_key } =>
-            handlers::tunnel_init(&host, port, &ca_cert, &worker_cert, &worker_key).await,
+        Commands::TunnelInit { queue, username, name } =>
+            handlers::tunnel_init(&queue, &username, name).await,
         Commands::Start      => handlers::start().await,
         Commands::Install    => handlers::install().await,
         Commands::Status     => handlers::status().await,
@@ -69,14 +63,6 @@ mod handlers {
     use anyhow::{Context, Result};
     use std::time::Duration;
     use crate::{auth, config, gpu, queue_client::QueueClient, rpc, wireguard};
-
-    fn load_cert(name: &str) -> Vec<u8> {
-        let dir = crate::config::data_dir().join("tunnel-certs");
-        let path = dir.join(name);
-        std::fs::read(&path).unwrap_or_else(|_| {
-            panic!("tunnel cert not found: {}", path.display())
-        })
-    }
 
     pub async fn init(
         queue_url: &str,
@@ -227,14 +213,21 @@ mod handlers {
         println!("rpc-server running on 0.0.0.0:{}", cfg.rpc_port);
 
         if use_tunnel {
+            let cert_dir = config::data_dir().join("tunnel-certs");
+            let ca = std::fs::read(cert_dir.join("ca.crt"))
+                .context("tunnel CA cert not found — run `akai-agent tunnel-init` first")?;
+            let wcrt = std::fs::read(cert_dir.join("worker.crt"))
+                .context("tunnel worker cert not found — run `akai-agent tunnel-init` first")?;
+            let wkey = std::fs::read(cert_dir.join("worker.key"))
+                .context("tunnel worker key not found — run `akai-agent tunnel-init` first")?;
             let tunnel_client = crate::tunnel::TunnelClient::new(
                 &cfg.tunnel_host,
                 cfg.tunnel_port,
                 &cfg.worker_id,
                 cfg.rpc_port,
-                load_cert("ca.crt"),
-                load_cert("worker.crt"),
-                load_cert("worker.key"),
+                ca,
+                wcrt,
+                wkey,
             );
             tokio::spawn(async move {
                 if let Err(e) = tunnel_client.run().await {
@@ -353,34 +346,76 @@ mod handlers {
     }
 
     pub async fn tunnel_init(
-        host: &str,
-        port: u16,
-        ca_cert_path: &str,
-        worker_cert_path: &str,
-        worker_key_path: &str,
+        queue_url: &str,
+        username:  &str,
+        name:      Option<String>,
     ) -> Result<()> {
-        let mut cfg = config::load_config()
-            .context("Config not found. Run `akai-agent init` first.")?;
+        let worker_name = name.unwrap_or_else(||
+            hostname::get()
+                .map(|h| h.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "akai-worker".to_string())
+        );
 
         let cert_dir = config::data_dir().join("tunnel-certs");
+        let ca_path = cert_dir.join("ca.crt");
+        let wcrt_path = cert_dir.join("worker.crt");
+        let wkey_path = cert_dir.join("worker.key");
+
+        if ca_path.exists() && wcrt_path.exists() && wkey_path.exists() {
+            println!("Tunnel certs already exist at {}", cert_dir.display());
+            println!("To re-download, delete them first:");
+            println!("  rm -rf {}", cert_dir.display());
+            return Ok(());
+        }
+
+        println!("Fetching tunnel certs from {}...", queue_url);
+
+        let client = QueueClient::new(queue_url, username);
+        let (_, public_key) = auth::ensure_keypair()?;
+
+        let certs = match client.fetch_tunnel_certs().await {
+            Ok(c) => c,
+            Err(e) if e.to_string().starts_with("401") || e.to_string().contains("AUTH_REQUIRED") => {
+                println!("Auth required — triggering Duo 2FA...");
+                client.auth_duo(&worker_name, &public_key).await
+                    .context("Duo 2FA failed — cannot fetch tunnel certs without authentication")?;
+                client.fetch_tunnel_certs().await
+                    .context("Failed to fetch tunnel certs after auth")?
+            }
+            Err(e) => return Err(e.context("Failed to fetch tunnel certs")),
+        };
+
         std::fs::create_dir_all(&cert_dir)
             .context("failed to create tunnel-certs directory")?;
 
-        std::fs::copy(ca_cert_path, cert_dir.join("ca.crt"))
-            .context("failed to copy CA cert")?;
-        std::fs::copy(worker_cert_path, cert_dir.join("worker.crt"))
-            .context("failed to copy worker cert")?;
-        std::fs::copy(worker_key_path, cert_dir.join("worker.key"))
-            .context("failed to copy worker key")?;
+        std::fs::write(&ca_path, &certs.ca_cert)
+            .context("failed to write CA cert")?;
+        std::fs::write(&wcrt_path, &certs.worker_cert)
+            .context("failed to write worker cert")?;
+        std::fs::write(&wkey_path, &certs.worker_key)
+            .context("failed to write worker key")?;
 
-        cfg.tunnel_host = host.to_string();
-        cfg.tunnel_port = port;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wkey_path, std::fs::Permissions::from_mode(0o600))
+                .ok();
+        }
+
+        println!("Tunnel certs saved to {}", cert_dir.display());
+        println!("  CA:     {}", ca_path.display());
+        println!("  Cert:   {}", wcrt_path.display());
+        println!("  Key:    {}", wkey_path.display());
+        println!("  Server: {}:{}", certs.tunnel_host, certs.tunnel_port);
+
+        let mut cfg = config::load_config()
+            .context("Config not found. Run `akai-agent init` first.")?;
+        cfg.tunnel_host = certs.tunnel_host;
+        cfg.tunnel_port = certs.tunnel_port;
         config::save_config(&cfg)?;
 
-        println!("Tunnel configured!");
-        println!("  Host: {}:{}", host, port);
-        println!("  Certs: {}", cert_dir.display());
-        println!("  Run `akai-agent start` to connect via mTLS tunnel");
+        println!("Config updated with tunnel server: {}:{}", cfg.tunnel_host, cfg.tunnel_port);
+        println!("Run `akai-agent start` to connect via mTLS tunnel");
         Ok(())
     }
 

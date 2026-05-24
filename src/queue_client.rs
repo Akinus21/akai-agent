@@ -78,6 +78,15 @@ pub struct WorkerStatus {
     pub rpc_port: u16,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct TunnelCertsResponse {
+    pub tunnel_host:  String,
+    pub tunnel_port:  u16,
+    pub ca_cert:      String,
+    pub worker_cert:  String,
+    pub worker_key:   String,
+}
+
 impl QueueClient {
     pub fn new(base_url: &str, username: &str) -> Self {
         Self {
@@ -241,6 +250,20 @@ impl QueueClient {
             .send().await?;
         if !resp.status().is_success() {
             bail!("status failed: {}", resp.status());
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub async fn fetch_tunnel_certs(&self) -> Result<TunnelCertsResponse> {
+        let path = "/tunnel/certs";
+        let headers = self.auth_headers("GET", path, &[])?;
+
+        let resp = self.client
+            .get(format!("{}{}", self.base_url, path))
+            .headers(headers)
+            .send().await?;
+        if !resp.status().is_success() {
+            bail!("fetch tunnel certs failed: {} — {}", resp.status(), resp.text().await?);
         }
         Ok(resp.json().await?)
     }
