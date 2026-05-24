@@ -3,10 +3,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio_rustls::client::danger::ServerVerifier;
-use tokio_rustls::rustls::crypto::ring::crypto_provider;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
-use tokio_rustls::rustls::{ClientConfig, DigitallySignedStruct, DnsName, RootCertStore};
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 use std::collections::HashMap;
 
@@ -101,6 +99,7 @@ impl TunnelClient {
     }
 
     fn build_tls_connector(&self) -> Result<TlsConnector> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut root_store = RootCertStore::empty();
         let ca_certs = rustls_pemfile::certs(&mut &self.ca_cert_pem[..])
             .collect::<Result<Vec<_>, _>>()
