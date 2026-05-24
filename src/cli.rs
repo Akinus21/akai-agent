@@ -374,15 +374,19 @@ mod handlers {
         let (_, public_key) = auth::ensure_keypair()?;
 
         let certs = match client.fetch_tunnel_certs().await {
-            Ok(c) => c,
-            Err(e) if e.to_string().starts_with("401") || e.to_string().contains("AUTH_REQUIRED") => {
+            Ok(c) => {
+                println!("Authenticated with existing key.");
+                c
+            }
+            Err(_) => {
                 println!("Auth required — triggering Duo 2FA...");
-                client.auth_duo(&worker_name, &public_key).await
-                    .context("Duo 2FA failed — cannot fetch tunnel certs without authentication")?;
+                let provision = client.auth_duo(&worker_name, &public_key).await
+                    .context("Duo 2FA failed")?;
+                println!("Duo approved. WireGuard provisioned (IP: {})", provision.wg_ip.unwrap_or_default());
+                println!("Fetching tunnel certs with authenticated key...");
                 client.fetch_tunnel_certs().await
                     .context("Failed to fetch tunnel certs after auth")?
             }
-            Err(e) => return Err(e.context("Failed to fetch tunnel certs")),
         };
 
         std::fs::create_dir_all(&cert_dir)

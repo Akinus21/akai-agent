@@ -267,4 +267,13 @@ impl QueueClient {
         }
         Ok(resp.json().await?)
     }
+        if !resp.status().is_success() {
+            bail!("fetch tunnel certs failed: {} — {}", resp.status(), resp.text().await?);
+        }
+        Ok(resp.json().await?)
+    }
+
+    fn api_key_header(&self) -> String {
+        std::env::var("WORKER_API_KEY").unwrap_or_else(|_| String::new())
+    }
 }
