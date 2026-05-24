@@ -132,7 +132,7 @@ impl TunnelClient {
         let rpc_port = self.rpc_port;
         let conns = self.conns.clone();
 
-        let domain = ServerName::try_from(server_host.as_str())
+        let domain = ServerName::try_from(server_host.clone())
             .map_err(|e| anyhow::anyhow!("invalid server name: {e}"))?;
 
         let tcp = TcpStream::connect((&*server_host, self.server_port)).await
