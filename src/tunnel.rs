@@ -84,6 +84,7 @@ impl TunnelClient {
 
     pub async fn run(&self) -> Result<()> {
         let connector = self.build_tls_connector()?;
+        let conns = self.conns.clone();
 
         loop {
             match self.connect_and_serve(&connector).await {
@@ -94,7 +95,7 @@ impl TunnelClient {
                     tracing::error!("tunnel error: {e}, reconnecting in 5s...");
                 }
             }
-            self.conns.lock().await.clear();
+            conns.lock().await.clear();
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     }
