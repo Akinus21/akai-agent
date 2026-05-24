@@ -91,10 +91,10 @@ impl TunnelClient {
         loop {
             match self.connect_and_serve(&connector).await {
                 Ok(()) => {
-                    tracing::warn!("tunnel disconnected, reconnecting in 5s...");
+                    eprintln!("tunnel disconnected, reconnecting in 5s...");
                 }
                 Err(e) => {
-                    tracing::error!("tunnel error: {e}, reconnecting in 5s...");
+                    eprintln!("tunnel error: {e}, reconnecting in 5s...");
                 }
             }
             conns.lock().await.clear();
@@ -167,7 +167,7 @@ impl TunnelClient {
         writer.write_all(&handshake).await?;
         writer.flush().await?;
 
-        tracing::info!("tunnel connected to {}:{}", server_host, self.server_port);
+        println!("tunnel connected to {}:{}", server_host, self.server_port);
 
         let writer = Arc::new(Mutex::new(writer));
 
