@@ -7,6 +7,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 use std::collections::HashMap;
+use std::io::Cursor;
 
 const MAGIC: &[u8; 8] = b"AKAITUNL";
 const V1: u8 = 1;
@@ -101,21 +102,18 @@ impl TunnelClient {
     fn build_tls_connector(&self) -> Result<TlsConnector> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mut root_store = RootCertStore::empty();
-        let ca_pem = self.ca_cert_pem.clone();
-        let ca_certs = rustls_pemfile::certs(&mut &ca_pem[..])
+        let ca_certs = rustls_pemfile::certs(&mut Cursor::new(&self.ca_cert_pem))
             .collect::<Result<Vec<_>, _>>()
             .context("failed to parse CA cert")?;
         for cert in ca_certs {
             root_store.add(cert).context("invalid CA cert")?;
         }
 
-        let client_pem = self.client_cert_pem.clone();
-        let client_certs = rustls_pemfile::certs(&mut &client_pem[..])
+        let client_certs = rustls_pemfile::certs(&mut Cursor::new(&self.client_cert_pem))
             .collect::<Result<Vec<_>, _>>()
             .context("failed to parse client cert")?;
 
-        let key_pem = self.client_key_pem.clone();
-        let client_key = rustls_pemfile::private_key(&mut &key_pem[..])
+        let client_key = rustls_pemfile::private_key(&mut Cursor::new(&self.client_key_pem))
             .context("failed to parse client key")?
             .context("no client key in PEM")?;
 
