@@ -6,6 +6,7 @@ mod gpu;
 mod queue_client;
 mod rpc;
 mod service;
+mod tunnel;
 mod wireguard;
 
 #[tokio::main]

@@ -25,6 +25,23 @@ pub enum Commands {
         rpc_port: u16,
     },
 
+    TunnelInit {
+        #[arg(long)]
+        host: String,
+
+        #[arg(long, default_value = "50053")]
+        port: u16,
+
+        #[arg(long)]
+        ca_cert: String,
+
+        #[arg(long)]
+        worker_cert: String,
+
+        #[arg(long)]
+        worker_key: String,
+    },
+
     Start,
 
     Install,
@@ -39,6 +56,8 @@ pub async fn run() -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { queue, username, name, rpc_port } =>
             handlers::init(&queue, &username, name, rpc_port).await,
+        Commands::TunnelInit { host, port, ca_cert, worker_cert, worker_key } =>
+            handlers::tunnel_init(&host, port, &ca_cert, &worker_cert, &worker_key).await,
         Commands::Start      => handlers::start().await,
         Commands::Install    => handlers::install().await,
         Commands::Status     => handlers::status().await,
@@ -50,6 +69,14 @@ mod handlers {
     use anyhow::{Context, Result};
     use std::time::Duration;
     use crate::{auth, config, gpu, queue_client::QueueClient, rpc, wireguard};
+
+    fn load_cert(name: &str) -> Vec<u8> {
+        let dir = crate::config::data_dir().join("tunnel-certs");
+        let path = dir.join(name);
+        std::fs::read(&path).unwrap_or_else(|_| {
+            panic!("tunnel cert not found: {}", path.display())
+        })
+    }
 
     pub async fn init(
         queue_url: &str,
@@ -140,6 +167,8 @@ mod handlers {
             rpc_version,
             username:    username.to_string(),
             public_key,
+            tunnel_host: String::new(),
+            tunnel_port: 0,
         };
         config::save_config(&cfg)?;
         println!("Config saved to {}", config::config_path().display());
@@ -158,14 +187,23 @@ mod handlers {
         println!("Starting akai-agent");
         println!("  Worker:    {}", cfg.worker_id);
         println!("  Queue:     {}", cfg.queue_url);
-        println!("  WireGuard: {}", cfg.wg_ip);
         println!("  RPC port:  {}", cfg.rpc_port);
 
-        println!("Verifying WireGuard tunnel...");
-        if !wireguard::check_tunnel(&cfg.wg_ip) {
-            eprintln!("  WireGuard tunnel is down — re-establishing...");
-            wireguard::ensure_tunnel(&cfg.wg_ip)
-                .context("Failed to establish WireGuard tunnel. RPC workers will be unreachable.")?;
+        let use_tunnel = !cfg.tunnel_host.is_empty();
+
+        if use_tunnel {
+            println!("  Tunnel:    {}:{}", cfg.tunnel_host, cfg.tunnel_port);
+        } else {
+            println!("  WireGuard: {}", cfg.wg_ip);
+        }
+
+        if !use_tunnel {
+            println!("Verifying WireGuard tunnel...");
+            if !wireguard::check_tunnel(&cfg.wg_ip) {
+                eprintln!("  WireGuard tunnel is down — re-establishing...");
+                wireguard::ensure_tunnel(&cfg.wg_ip)
+                    .context("Failed to establish WireGuard tunnel. RPC workers will be unreachable.")?;
+            }
         }
 
         let client = QueueClient::from_config(&cfg);
@@ -188,6 +226,23 @@ mod handlers {
             .context("Failed to spawn rpc-server")?;
         println!("rpc-server running on 0.0.0.0:{}", cfg.rpc_port);
 
+        if use_tunnel {
+            let tunnel_client = crate::tunnel::TunnelClient::new(
+                &cfg.tunnel_host,
+                cfg.tunnel_port,
+                &cfg.worker_id,
+                cfg.rpc_port,
+                load_cert("ca.crt"),
+                load_cert("worker.crt"),
+                load_cert("worker.key"),
+            );
+            tokio::spawn(async move {
+                if let Err(e) = tunnel_client.run().await {
+                    tracing::error!("tunnel client failed: {e}");
+                }
+            });
+        }
+
         let mut heartbeat_tick  = tokio::time::interval(Duration::from_secs(30));
         let mut tunnel_tick     = tokio::time::interval(Duration::from_secs(120));
         let mut update_tick     = tokio::time::interval(Duration::from_secs(86400));
@@ -198,7 +253,7 @@ mod handlers {
         loop {
             tokio::select! {
                 _ = heartbeat_tick.tick() => {
-                    if !wireguard::check_tunnel(&cfg.wg_ip) {
+                    if !use_tunnel && !wireguard::check_tunnel(&cfg.wg_ip) {
                         eprintln!("WireGuard tunnel is down — pausing heartbeats until re-established");
                         match wireguard::ensure_tunnel(&cfg.wg_ip) {
                             Ok(()) => println!("WireGuard tunnel re-established — resuming"),
@@ -245,20 +300,29 @@ mod handlers {
                         }
                         Err(e) if is_not_found(&e) => {
                             eprintln!("Not in registry — re-registering...");
-                            let wg_pub = crate::wireguard::get_wg_public_key();
-                            let _ = client.register(
-                                &cfg.worker_id, &cfg.worker_name,
-                                &cfg.wg_ip,     &cfg.wg_peer_id,
-                                cfg.gpu,         cfg.vram_gb, cfg.rpc_port,
-                                wg_pub,
-                            ).await;
+                            if use_tunnel {
+                                let _ = client.register(
+                                    &cfg.worker_id, &cfg.worker_name,
+                                    &cfg.wg_ip, &cfg.wg_peer_id,
+                                    cfg.gpu, cfg.vram_gb, cfg.rpc_port,
+                                    None,
+                                ).await;
+                            } else {
+                                let wg_pub = crate::wireguard::get_wg_public_key();
+                                let _ = client.register(
+                                    &cfg.worker_id, &cfg.worker_name,
+                                    &cfg.wg_ip, &cfg.wg_peer_id,
+                                    cfg.gpu, cfg.vram_gb, cfg.rpc_port,
+                                    wg_pub,
+                                ).await;
+                            }
                         }
                         Err(e) => eprintln!("Heartbeat failed: {e}"),
                     }
                 }
 
                 _ = tunnel_tick.tick() => {
-                    if !wireguard::check_tunnel(&cfg.wg_ip) {
+                    if !use_tunnel && !wireguard::check_tunnel(&cfg.wg_ip) {
                         eprintln!("Periodic check: WireGuard tunnel is down");
                         match wireguard::ensure_tunnel(&cfg.wg_ip) {
                             Ok(()) => println!("WireGuard tunnel re-established"),
@@ -286,6 +350,38 @@ mod handlers {
                 }
             }
         }
+    }
+
+    pub async fn tunnel_init(
+        host: &str,
+        port: u16,
+        ca_cert_path: &str,
+        worker_cert_path: &str,
+        worker_key_path: &str,
+    ) -> Result<()> {
+        let mut cfg = config::load_config()
+            .context("Config not found. Run `akai-agent init` first.")?;
+
+        let cert_dir = config::data_dir().join("tunnel-certs");
+        std::fs::create_dir_all(&cert_dir)
+            .context("failed to create tunnel-certs directory")?;
+
+        std::fs::copy(ca_cert_path, cert_dir.join("ca.crt"))
+            .context("failed to copy CA cert")?;
+        std::fs::copy(worker_cert_path, cert_dir.join("worker.crt"))
+            .context("failed to copy worker cert")?;
+        std::fs::copy(worker_key_path, cert_dir.join("worker.key"))
+            .context("failed to copy worker key")?;
+
+        cfg.tunnel_host = host.to_string();
+        cfg.tunnel_port = port;
+        config::save_config(&cfg)?;
+
+        println!("Tunnel configured!");
+        println!("  Host: {}:{}", host, port);
+        println!("  Certs: {}", cert_dir.display());
+        println!("  Run `akai-agent start` to connect via mTLS tunnel");
+        Ok(())
     }
 
     pub async fn install() -> Result<()> {

@@ -19,6 +19,10 @@ pub struct Config {
     pub username:    String,
     #[serde(default)]
     pub public_key:  String,
+    #[serde(default)]
+    pub tunnel_host: String,
+    #[serde(default)]
+    pub tunnel_port: u16,
 }
 
 pub fn config_path() -> PathBuf {
