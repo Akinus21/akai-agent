@@ -16,7 +16,7 @@ pub fn get_wg_public_key() -> Option<String> {
         let line = line.trim();
         if line.starts_with("PrivateKey") {
             let key = line.split('=').nth(1)?.trim();
-            let output = std::process::Command::new("wg")
+            let mut child = std::process::Command::new("wg")
                 .args(["pubkey"])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
@@ -25,10 +25,10 @@ pub fn get_wg_public_key() -> Option<String> {
                 .ok()?;
             {
                 use std::io::Write;
-                let mut stdin = output.stdin?;
+                let mut stdin = child.stdin.take()?;
                 stdin.write_all(key.as_bytes()).ok();
             }
-            let output = output.wait_with_output().ok()?;
+            let output = child.wait_with_output().ok()?;
             if output.status.success() {
                 return Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
             }
