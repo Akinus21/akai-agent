@@ -27,15 +27,16 @@ struct AuthDuoRequest<'a> {
 
 #[derive(Serialize)]
 struct RegisterRequest<'a> {
-    id:         &'a str,
-    name:       &'a str,
-    wg_ip:      &'a str,
-    wg_peer_id: &'a str,
-    gpu:        bool,
-    vram_gb:    f64,
-    rpc_port:   u16,
+    id:             &'a str,
+    name:           &'a str,
+    wg_ip:          &'a str,
+    wg_peer_id:     &'a str,
+    wg_public_key:  Option<String>,
+    gpu:            bool,
+    vram_gb:        f64,
+    rpc_port:       u16,
     #[serde(default)]
-    models:     Vec<String>,
+    models:         Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -179,8 +180,9 @@ impl QueueClient {
         &self,
         id: &str, name: &str, wg_ip: &str, wg_peer_id: &str,
         gpu: bool, vram_gb: f64, rpc_port: u16,
+        wg_public_key: Option<String>,
     ) -> Result<()> {
-        let body = serde_json::to_vec(&RegisterRequest { id, name, wg_ip, wg_peer_id, gpu, vram_gb, rpc_port, models: Vec::new() })?;
+        let body = serde_json::to_vec(&RegisterRequest { id, name, wg_ip, wg_peer_id, wg_public_key, gpu, vram_gb, rpc_port, models: Vec::new() })?;
         let path = "/workers/register".to_string();
         let headers = self.auth_headers("POST", &path, &body)?;
 

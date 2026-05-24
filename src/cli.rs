@@ -108,6 +108,10 @@ mod handlers {
         println!("rpc-server ready at {}", rpc_path.display());
 
         let worker_id = worker_name.clone();
+        let wg_pub = crate::wireguard::get_wg_public_key();
+        if wg_pub.is_none() {
+            eprintln!("Warning: could not derive WireGuard public key — tunnel re-provisioning may fail");
+        }
         match client.register(
             &worker_id,
             &worker_name,
@@ -116,6 +120,7 @@ mod handlers {
             gpu_info.has_gpu,
             gpu_info.vram_gb,
             rpc_port,
+            wg_pub,
         ).await {
             Ok(_)  => println!("Registered with queue"),
             Err(e) => eprintln!("Registration failed: {}. Retry with `akai-agent start`.", e),
@@ -240,10 +245,12 @@ mod handlers {
                         }
                         Err(e) if is_not_found(&e) => {
                             eprintln!("Not in registry — re-registering...");
+                            let wg_pub = crate::wireguard::get_wg_public_key();
                             let _ = client.register(
                                 &cfg.worker_id, &cfg.worker_name,
                                 &cfg.wg_ip,     &cfg.wg_peer_id,
                                 cfg.gpu,         cfg.vram_gb, cfg.rpc_port,
+                                wg_pub,
                             ).await;
                         }
                         Err(e) => eprintln!("Heartbeat failed: {e}"),

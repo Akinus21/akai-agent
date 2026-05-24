@@ -5,6 +5,38 @@ mod windows;
 use anyhow::Result;
 use crate::queue_client::ProvisionResponse;
 
+pub fn get_wg_public_key() -> Option<String> {
+    let conf_path = match std::env::consts::OS {
+        "linux" | "macos" => "/etc/wireguard/wg0.conf",
+        "windows" => return None,
+        _ => return None,
+    };
+    let conf = std::fs::read_to_string(conf_path).ok()?;
+    for line in conf.lines() {
+        let line = line.trim();
+        if line.starts_with("PrivateKey") {
+            let key = line.split('=').nth(1)?.trim();
+            let output = std::process::Command::new("wg")
+                .args(["pubkey"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .ok()?;
+            {
+                use std::io::Write;
+                let mut stdin = output.stdin?;
+                stdin.write_all(key.as_bytes()).ok();
+            }
+            let output = output.wait_with_output().ok()?;
+            if output.status.success() {
+                return Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 pub async fn configure(provision: &ProvisionResponse) -> Result<()> {
     match std::env::consts::OS {
         "linux" => linux::configure(provision),
