@@ -83,7 +83,8 @@ impl TunnelClient {
     }
 
     pub async fn run(&self) -> Result<()> {
-        let connector = self.build_tls_connector()?;
+        let connector = self.build_tls_connector()
+            .map_err(|e| anyhow::anyhow!("TLS config failed: {e}"))?;
         let conns = self.conns.clone();
 
         loop {
@@ -106,6 +107,9 @@ impl TunnelClient {
         let ca_certs = rustls_pemfile::certs(&mut Cursor::new(self.ca_cert_pem.clone()))
             .collect::<Result<Vec<_>, _>>()
             .context("failed to parse CA cert")?;
+        if ca_certs.is_empty() {
+            bail!("no CA certificates found in PEM");
+        }
         for cert in ca_certs {
             root_store.add(cert).context("invalid CA cert")?;
         }
@@ -113,17 +117,33 @@ impl TunnelClient {
         let client_certs = rustls_pemfile::certs(&mut Cursor::new(self.client_cert_pem.clone()))
             .collect::<Result<Vec<_>, _>>()
             .context("failed to parse client cert")?;
+        if client_certs.is_empty() {
+            bail!("no client certificates found in PEM");
+        }
 
         let client_key = rustls_pemfile::private_key(&mut Cursor::new(self.client_key_pem.clone()))
             .context("failed to parse client key")?
             .context("no client key in PEM")?;
 
+        tracing::info!(
+            "tls: {} CA certs, {} client certs, key kind={:?}",
+            root_store.len(),
+            client_certs.len(),
+            client_key.algorithm(),
+        );
+
         let config = ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_client_auth_cert(client_certs, client_key)
-            .context("invalid client cert/key")?;
+            .map_err(|e| anyhow::anyhow!("with_client_auth_cert failed: {e} (key kind={:?})",
+                rustls_pemfile::private_key(&mut Cursor::new(self.client_key_pem.clone()))
+                    .ok().flatten()
+                    .map(|k| format!("{:?}", k.algorithm()))
+                    .unwrap_or_default()
+            ))?;
 
         Ok(TlsConnector::from(Arc::new(config)))
+    }
     }
 
     async fn connect_and_serve(&self, connector: &TlsConnector) -> Result<()> {
