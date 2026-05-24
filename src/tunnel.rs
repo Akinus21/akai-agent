@@ -126,21 +126,15 @@ impl TunnelClient {
             .context("no client key in PEM")?;
 
         tracing::info!(
-            "tls: {} CA certs, {} client certs, key kind={:?}",
+            "tls: {} CA certs, {} client certs",
             root_store.len(),
             client_certs.len(),
-            client_key.algorithm(),
         );
 
         let config = ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_client_auth_cert(client_certs, client_key)
-            .map_err(|e| anyhow::anyhow!("with_client_auth_cert failed: {e} (key kind={:?})",
-                rustls_pemfile::private_key(&mut Cursor::new(self.client_key_pem.clone()))
-                    .ok().flatten()
-                    .map(|k| format!("{:?}", k.algorithm()))
-                    .unwrap_or_default()
-            ))?;
+            .map_err(|e| anyhow::anyhow!("with_client_auth_cert failed: {e}"))?;
 
         Ok(TlsConnector::from(Arc::new(config)))
     }
