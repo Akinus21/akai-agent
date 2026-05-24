@@ -127,32 +127,35 @@ impl TunnelClient {
     }
 
     async fn connect_and_serve(&self, connector: &TlsConnector) -> Result<()> {
-        let domain = ServerName::try_from(self.server_host.as_str())
+        let server_host = self.server_host.clone();
+        let worker_id = self.worker_id.clone();
+        let rpc_port = self.rpc_port;
+        let conns = self.conns.clone();
+
+        let domain = ServerName::try_from(server_host.as_str())
             .map_err(|e| anyhow::anyhow!("invalid server name: {e}"))?;
 
-        let tcp = TcpStream::connect((&*self.server_host, self.server_port)).await
+        let tcp = TcpStream::connect((&*server_host, self.server_port)).await
             .context("TCP connect failed")?;
         let tls = connector.connect(domain, tcp).await
             .context("TLS handshake failed")?;
 
         let (mut reader, mut writer) = tokio::io::split(tls);
 
-        let wid_bytes = self.worker_id.as_bytes();
+        let wid_bytes = worker_id.as_bytes();
         let mut handshake = Vec::with_capacity(8 + 1 + 2 + wid_bytes.len() + 2);
         handshake.extend_from_slice(MAGIC);
         handshake.push(V1);
         handshake.extend_from_slice(&(wid_bytes.len() as u16).to_be_bytes());
         handshake.extend_from_slice(wid_bytes);
-        handshake.extend_from_slice(&self.rpc_port.to_be_bytes());
+        handshake.extend_from_slice(&rpc_port.to_be_bytes());
 
         writer.write_all(&handshake).await?;
         writer.flush().await?;
 
-        tracing::info!("tunnel connected to {}:{}", self.server_host, self.server_port);
+        tracing::info!("tunnel connected to {}:{}", server_host, self.server_port);
 
         let writer = Arc::new(Mutex::new(writer));
-        let conns = self.conns.clone();
-        let rpc_port = self.rpc_port;
 
         let ping_writer = writer.clone();
         let ping_handle = tokio::spawn(async move {
