@@ -108,7 +108,6 @@ impl TunnelClient {
     }
 
     fn build_tls_connector(&self) -> Result<TlsConnector> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut root_store = RootCertStore::empty();
         let ca_certs = rustls_pemfile::certs(&mut Cursor::new(self.ca_cert_pem.clone()))
             .collect::<Result<Vec<_>, _>>()
