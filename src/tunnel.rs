@@ -208,8 +208,11 @@ impl TunnelClient {
                         let w = writer.clone();
                         let c = conns.clone();
 
+                        let (write_tx, write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+                        conns.lock().await.insert(conn_id, ConnState { write_tx: write_tx.clone() });
+
                         tokio::spawn(async move {
-                            if let Err(e) = serve_conn(conn_id, rpc_port, w, c).await {
+                            if let Err(e) = serve_conn(conn_id, rpc_port, w, c, write_rx).await {
                                 tracing::debug!("conn {} ended: {e}", conn_id);
                             }
                         });
@@ -250,14 +253,11 @@ async fn serve_conn(
     rpc_port: u16,
     tunnel_writer: Arc<Mutex<TlsWriteHalf>>,
     conns: Arc<Mutex<HashMap<u32, ConnState>>>,
+    mut write_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) -> Result<()> {
     let local = TcpStream::connect(format!("127.0.0.1:{}", rpc_port)).await
         .context("connect to local rpc-server failed")?;
     let (mut rpc_reader, mut rpc_writer) = local.into_split();
-
-    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
-
-    conns.lock().await.insert(conn_id, ConnState { write_tx: write_tx.clone() });
 
     let conn_id_bytes = conn_id.to_be_bytes();
 
