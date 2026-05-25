@@ -438,7 +438,7 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
         }
     } else if is_vulkan {
         println!("  Detected Vulkan GPU. Installing Vulkan SDK in container...");
-        let vulkan_install_cmd = "sudo apt-get update -qq && sudo apt-get install -y libvulkan-dev vulkan-tools spirv-tools glslang-tools mesa-vulkan-drivers";
+        let vulkan_install_cmd = "sudo apt-get update -qq && sudo apt-get install -y libvulkan-dev vulkan-tools spirv-tools glslang-tools glslc libshaderc-dev mesa-vulkan-drivers";
         let status = run_distrobox(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), vulkan_install_cmd.to_string()])?;
         if !status.success() {
             println!("  Vulkan SDK install failed, building CPU-only fallback...");

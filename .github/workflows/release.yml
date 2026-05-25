@@ -86,7 +86,7 @@ jobs:
       - name: Install Vulkan SDK
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y cmake gcc g++ git wget libvulkan-dev spirv-tools glslang-tools mesa-vulkan-drivers
+          sudo apt-get install -y cmake gcc g++ git wget libvulkan-dev spirv-tools glslang-tools glslc libshaderc-dev mesa-vulkan-drivers
 
       - name: Clone llama.cpp
         run: |
