@@ -31,6 +31,7 @@ rand               = "0.8"
 base64             = "0.22"
 tokio-rustls       = "0.26"
 rustls             = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+ring               = "0.17"
 rustls-pemfile     = "2"
 webpki-roots       = "0.26"
 
