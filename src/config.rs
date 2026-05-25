@@ -16,6 +16,8 @@ pub struct Config {
     pub rpc_binary:  String,
     pub rpc_version: String,
     #[serde(default)]
+    pub gpu_backend: String,
+    #[serde(default)]
     pub username:    String,
     #[serde(default)]
     pub public_key:  String,

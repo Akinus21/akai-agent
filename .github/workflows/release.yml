@@ -78,6 +78,64 @@ jobs:
             -d "$PAYLOAD" \
             "https://webhook.akinus21.com/webhook/akai-agent-build" || true
 
+  build-rpc-vulkan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vulkan SDK
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake gcc g++ git wget libvulkan-dev spirv-tools glslang-tools mesa-vulkan-drivers
+
+      - name: Clone llama.cpp
+        run: |
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
+
+      - name: Build rpc-server with Vulkan
+        run: |
+          cd /tmp/llama.cpp
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DGGML_RPC=ON -DGGML_VULKAN=ON
+          cmake --build . --config Release -j$(nproc)
+
+      - name: Bundle rpc-server + libraries
+        run: |
+          mkdir -p /tmp/rpc-bundle/lib
+          cp /tmp/llama.cpp/build/bin/rpc-server /tmp/rpc-bundle/ 2>/dev/null || true
+          cp /tmp/llama.cpp/build/bin/llama-rpc-server /tmp/rpc-bundle/ 2>/dev/null || true
+
+          for dir in /tmp/llama.cpp/build/bin /tmp/llama.cpp/build; do
+            for f in "$dir"/libggml*.so "$dir"/libggml*.so.*; do
+              [ -f "$f" ] && cp "$f" /tmp/rpc-bundle/lib/ 2>/dev/null || true
+            done
+          done
+
+          echo "=== Bundling Vulkan runtime libraries ==="
+          for dir in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/local/lib; do
+            for f in "$dir"/libvulkan.so* "$dir"/libMesaVK*.so*; do
+              [ -f "$f" ] && cp -L "$f" /tmp/rpc-bundle/lib/ 2>/dev/null || true
+            done
+          done
+
+          echo "=== Bundle contents ==="
+          ls -la /tmp/rpc-bundle/
+          echo "=== Bundle libs ==="
+          ls -la /tmp/rpc-bundle/lib/
+
+      - name: Create archive
+        run: |
+          cd /tmp/rpc-bundle
+          FILES=""
+          [ -f rpc-server ] && FILES="$FILES rpc-server"
+          [ -f llama-rpc-server ] && FILES="$FILES llama-rpc-server"
+          tar czf /tmp/akai-agent-rpc-vulkan-linux-x86_64.tar.gz $FILES lib/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: akai-agent-rpc-vulkan-linux-x86_64
+          path: /tmp/akai-agent-rpc-vulkan-linux-x86_64.tar.gz
+
   build-rpc-cuda:
     runs-on: ubuntu-latest
     steps:
@@ -164,7 +222,7 @@ jobs:
           path: /tmp/akai-agent-rpc-cuda-linux-x86_64.tar.gz
 
   release:
-    needs: [build, build-rpc-cuda]
+    needs: [build, build-rpc-cuda, build-rpc-vulkan]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -179,6 +237,7 @@ jobs:
           cp artifacts/akai-agent-macos-aarch64/akai-agent ./akai-agent-macos-aarch64 2>/dev/null || true
           cp artifacts/akai-agent-windows-x86_64/akai-agent.exe ./akai-agent-windows-x86_64.exe 2>/dev/null || true
           cp artifacts/akai-agent-rpc-cuda-linux-x86_64/akai-agent-rpc-cuda-linux-x86_64.tar.gz ./akai-agent-rpc-cuda-linux-x86_64.tar.gz
+          cp artifacts/akai-agent-rpc-vulkan-linux-x86_64/akai-agent-rpc-vulkan-linux-x86_64.tar.gz ./akai-agent-rpc-vulkan-linux-x86_64.tar.gz
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -201,6 +260,7 @@ jobs:
           SHA_MAC_ARM=$(sha256sum akai-agent-macos-aarch64       | awk '{print $1}')
           SHA_MAC_X64=$(sha256sum akai-agent-macos-x86_64        | awk '{print $1}')
           SHA_RPC_CUDA=$(sha256sum akai-agent-rpc-cuda-linux-x86_64.tar.gz | awk '{print $1}')
+          SHA_RPC_VULKAN=$(sha256sum akai-agent-rpc-vulkan-linux-x86_64.tar.gz | awk '{print $1}')
 
           TAP="/tmp/homebrew-tap"
           rm -rf "$TAP"
@@ -243,14 +303,26 @@ jobs:
               sha256 "${SHA_RPC_CUDA}"
             end
 
+            resource "rpc-vulkan" do
+              url "${BASE}/akai-agent-rpc-vulkan-linux-x86_64.tar.gz"
+              sha256 "${SHA_RPC_VULKAN}"
+            end
+
             def install
               binary_name = stable.url.split("/").last
               bin.install binary_name => "akai-agent"
               if OS.linux? && Hardware::CPU.intel?
                 resource("rpc-cuda").stage do
                   (share/"akai-agent").mkpath
-                  cp "rpc-server", "#{share}/akai-agent/rpc-server" if File.exist?("rpc-server")
-                  cp "llama-rpc-server", "#{share}/akai-agent/llama-rpc-server" if File.exist?("llama-rpc-server")
+                  cp "rpc-server", "#{share}/akai-agent/rpc-server-cuda" if File.exist?("rpc-server")
+                  cp "llama-rpc-server", "#{share}/akai-agent/llama-rpc-server-cuda" if File.exist?("llama-rpc-server")
+                  (share/"akai-agent/lib").mkpath
+                  cp_r "lib/.", "#{share}/akai-agent/lib/" if File.exist?("lib")
+                end
+                resource("rpc-vulkan").stage do
+                  (share/"akai-agent").mkpath
+                  cp "rpc-server", "#{share}/akai-agent/rpc-server-vulkan" if File.exist?("rpc-server")
+                  cp "llama-rpc-server", "#{share}/akai-agent/llama-rpc-server-vulkan" if File.exist?("llama-rpc-server")
                   (share/"akai-agent/lib").mkpath
                   cp_r "lib/.", "#{share}/akai-agent/lib/" if File.exist?("lib")
                 end
@@ -284,7 +356,7 @@ jobs:
           git config user.email "iron-bot@akinus21.com"
           git config user.name "Iron Bot"
           git add Formula/akai-agent.rb
-          git commit -m "Update akai-agent to ${TAG} (all platforms + rpc-cuda)"
+          git commit -m "Update akai-agent to ${TAG} (all platforms + rpc-cuda + rpc-vulkan)"
           git push origin master
 
       - name: Notify webhook — failure

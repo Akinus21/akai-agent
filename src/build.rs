@@ -53,9 +53,30 @@ pub fn has_nvcc() -> bool {
     find_in_paths("nvcc").is_some()
 }
 
+pub fn has_vulkan() -> bool {
+    if find_in_paths("vulkaninfo").is_some() {
+        return true;
+    }
+    for entry in std::fs::read_dir("/sys/class/drm").unwrap_or_else(|_| std::fs::read_dir("/dev/null").unwrap()) {
+        if let Ok(entry) = entry {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("card") && !name.contains("-") {
+                let vendor_path = entry.path().join("device/vendor");
+                if let Ok(vendor) = std::fs::read_to_string(&vendor_path) {
+                    let v = vendor.trim();
+                    if v == "0x1002" || v == "0x1022" || v == "0x8086" {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn needs_source_build() -> bool {
     if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
-        has_cuda()
+        has_cuda() || has_vulkan()
     } else {
         false
     }
@@ -368,42 +389,59 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
     let eff_data = effective_data_dir();
     let eff_src = effective_source_dir();
 
-    let driver_ver = nvidia_driver_version().unwrap_or_default();
-    let (cuda_major, cuda_minor) = cuda_version_for_driver(&driver_ver);
-    let cuda_pkg = format!("cuda-toolkit-{}-{}", cuda_major, cuda_minor);
+    let is_cuda = has_cuda();
+    let is_vulkan = !is_cuda && has_vulkan();
+    let (cuda_major, cuda_minor) = if is_cuda {
+        let driver_ver = nvidia_driver_version().unwrap_or_default();
+        cuda_version_for_driver(&driver_ver)
+    } else {
+        (0, 0)
+    };
 
-    println!("  Detected NVIDIA driver {}, installing CUDA {}.{}", driver_ver, cuda_major, cuda_minor);
+    if is_cuda {
+        let driver_ver = nvidia_driver_version().unwrap_or_default();
+        let cuda_pkg = format!("cuda-toolkit-{}-{}", cuda_major, cuda_minor);
 
-    println!("  Installing CUDA toolkit {} in container...", cuda_pkg);
-    let cuda_install_cmd = format!(
-        "sudo apt-get update -qq && \
-         wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && \
-         sudo dpkg -i /tmp/cuda-keyring.deb && \
-         sudo apt-get update -qq && \
-         sudo apt-get install -y {pkg} && \
-         sudo ldconfig",
-        pkg = cuda_pkg
-    );
-    let status = run_distrobox(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), cuda_install_cmd])?;
-    if !status.success() {
-        println!("  CUDA toolkit install failed, trying individual packages...");
-        let fallback = format!(
+        println!("  Detected NVIDIA driver {}, installing CUDA {}.{}", driver_ver, cuda_major, cuda_minor);
+
+        println!("  Installing CUDA toolkit {} in container...", cuda_pkg);
+        let cuda_install_cmd = format!(
             "sudo apt-get update -qq && \
              wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && \
              sudo dpkg -i /tmp/cuda-keyring.deb && \
              sudo apt-get update -qq && \
-             sudo apt-get install -y --fix-broken && \
-             for pkg in cuda-nvcc-{maj}-{min} cuda-cudart-{maj}-{min} cuda-cudart-dev-{maj}-{min} \
-                        cuda-cccl-{maj}-{min} cuda-cupti-{maj}-{min} \
-                        libcublas-dev-{maj}-{min} libcublas-{maj}-{min}; do \
-               sudo apt-get install -y $pkg 2>/dev/null || true; \
-             done && \
+             sudo apt-get install -y {pkg} && \
              sudo ldconfig",
-            maj = cuda_major, min = cuda_minor
+            pkg = cuda_pkg
         );
-        let status = run_distrobox(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), fallback])?;
+        let status = run_distrobox(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), cuda_install_cmd])?;
         if !status.success() {
-            eprintln!("  CUDA installation failed. Building CPU-only.");
+            println!("  CUDA toolkit install failed, trying individual packages...");
+            let fallback = format!(
+                "sudo apt-get update -qq && \
+                 wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && \
+                 sudo dpkg -i /tmp/cuda-keyring.deb && \
+                 sudo apt-get update -qq && \
+                 sudo apt-get install -y --fix-broken && \
+                 for pkg in cuda-nvcc-{maj}-{min} cuda-cudart-{maj}-{min} cuda-cudart-dev-{maj}-{min} \
+                            cuda-cccl-{maj}-{min} cuda-cupti-{maj}-{min} \
+                            libcublas-dev-{maj}-{min} libcublas-{maj}-{min}; do \
+                   sudo apt-get install -y $pkg 2>/dev/null || true; \
+                 done && \
+                 sudo ldconfig",
+                maj = cuda_major, min = cuda_minor
+            );
+            let status = run_distrobox(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), fallback])?;
+            if !status.success() {
+                eprintln!("  CUDA installation failed. Building CPU-only.");
+            }
+        }
+    } else if is_vulkan {
+        println!("  Detected Vulkan GPU. Installing Vulkan SDK in container...");
+        let vulkan_install_cmd = "sudo apt-get update -qq && sudo apt-get install -y libvulkan-dev vulkan-tools spirv-tools glslang-tools mesa-vulkan-drivers";
+        let status = run_distrobox(&vec!["enter".into(), container.clone(), "--".into(), "sh".into(), "-c".into(), vulkan_install_cmd.to_string()])?;
+        if !status.success() {
+            println!("  Vulkan SDK install failed, building CPU-only fallback...");
         }
     }
 
@@ -411,13 +449,19 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
     let has_nvcc = !String::from_utf8_lossy(&has_nvcc_out.stdout).trim().is_empty();
 
     let arch = nvidia_gpu_compute_cap();
-    let cmake_args = if has_nvcc {
+    let use_vulkan = !has_cuda() && has_vulkan();
+
+    let cmake_args = if has_cuda() && has_nvcc {
         format!("-DGGML_CUDA=ON -DGGML_RPC=ON -DCMAKE_CUDA_ARCHITECTURES={}", arch)
+    } else if use_vulkan {
+        "-DGGML_VULKAN=ON -DGGML_RPC=ON".to_string()
     } else {
         "-DGGML_RPC=ON".to_string()
     };
 
-    println!("  Building rpc-server in distrobox (CUDA: {})...", has_nvcc);
+    let build_label = if has_cuda() && has_nvcc { "CUDA" } else if use_vulkan { "Vulkan" } else { "CPU" };
+
+    println!("  Building rpc-server in distrobox ({})...", build_label);
 
     let llama_src = format!("{}", eff_src.to_string_lossy());
     let data_path = format!("{}", eff_data.to_string_lossy());
@@ -436,43 +480,83 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
         bail!("Failed to create build directories in container");
     }
 
-    let build_cmd = format!(
-        "export PATH=/usr/local/cuda-{maj}.{min}/bin:$PATH && \
-         if [ ! -d '{src}/.git' ]; then \
-           git clone --depth 100 {repo} '{src}'; \
-         fi && \
-         cd '{src}' && git fetch origin {version} 2>/dev/null; git checkout {version} && \
-         mkdir -p '{src}/build' && \
-         cd '{src}/build' && \
-         for libdir in /run/host/usr/lib/x86_64-linux-gnu /run/host/usr/lib64 /run/host/lib/x86_64-linux-gnu /run/host/lib64 /usr/lib/x86_64-linux-gnu; do \
+    let cuda_path_setup = if has_cuda() && has_nvcc {
+        format!("export PATH=/usr/local/cuda-{maj}.{min}/bin:$PATH && ", maj = cuda_major, min = cuda_minor)
+    } else {
+        String::new()
+    };
+
+    let cuda_symlink_cmd = if has_cuda() {
+        "for libdir in /run/host/usr/lib/x86_64-linux-gnu /run/host/usr/lib64 /run/host/lib/x86_64-linux-gnu /run/host/lib64 /usr/lib/x86_64-linux-gnu; do \
            if [ -f \"$libdir/libcuda.so.1\" ]; then \
              sudo ln -sf \"$libdir/libcuda.so.1\" /usr/local/lib/libcuda.so.1 2>/dev/null; \
              sudo ln -sf \"$libdir/libcuda.so.1\" /usr/local/lib/libcuda.so 2>/dev/null; \
              break; \
            fi; \
          done && \
-         sudo ldconfig 2>/dev/null; \
+         sudo ldconfig 2>/dev/null; "
+    } else {
+        ""
+    };
+
+    let cuda_lib_copy = if has_cuda() && has_nvcc {
+        format!(
+            "for dir in /usr/local/cuda-{maj}.{min}/lib64 /usr/local/cuda/lib64 /usr/lib/x86_64-linux-gnu; do \
+               for f in \"$dir\"/libcudart.so* \"$dir\"/libcublasLt.so* \"$dir\"/libcublas.so* \"$dir\"/libcurand.so*; do \
+                 [ -f \"$f\" ] && cp -L \"$f\" '{data}/lib/' 2>/dev/null || true; \
+               done; \
+             done",
+            maj = cuda_major, min = cuda_minor, data = data_path
+        )
+    } else {
+        String::new()
+    };
+
+    let vulkan_lib_copy = if use_vulkan {
+        "for dir in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/local/lib /run/host/usr/lib/x86_64-linux-gnu; do \
+           for f in \"$dir\"/libvulkan.so* \"$dir\"/libMesaVK*.so* \"$dir\"/libvk*.so*; do \
+             [ -f \"$f\" ] && cp -L \"$f\" '{data_vulkan}/lib/' 2>/dev/null || true; \
+           done; \
+         done".replace("{data_vulkan}", &data_path)
+    } else {
+        String::new()
+    };
+
+    let lib_copy_parts: Vec<String> = vec![
+        format!("for dir in '{src}/build/bin' '{src}/build'; do \
+           for f in \"$dir\"/libggml*.so \"$dir\"/libggml*.so.*; do \
+             [ -f \"$f\" ] && cp \"$f\" '{data}/lib/' 2>/dev/null || true; \
+           done; \
+         done", src = llama_src, data = data_path),
+        cuda_lib_copy,
+        vulkan_lib_copy,
+    ].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>();
+
+    let lib_copy_cmd = lib_copy_parts.join(" && ");
+
+    let build_cmd = format!(
+        "{cuda_setup}\
+         if [ ! -d '{src}/.git' ]; then \
+           git clone --depth 100 {repo} '{src}'; \
+         fi && \
+         cd '{src}' && git fetch origin {version} 2>/dev/null; git checkout {version} && \
+         mkdir -p '{src}/build' && \
+         cd '{src}/build' && \
+         {symlink_cmd}\
          cmake .. -DCMAKE_BUILD_TYPE=Release {cmake_args} && \
          cmake --build . --config Release -j$(nproc) && \
          cp '{src}/build/bin/rpc-server' '{data}/rpc-server' 2>/dev/null || \
          cp '{src}/build/bin/llama-rpc-server' '{data}/rpc-server' 2>/dev/null || true && \
          mkdir -p '{data}/lib' && \
-         for dir in '{src}/build/bin' '{src}/build'; do \
-           for f in \"$dir\"/libggml*.so \"$dir\"/libggml*.so.*; do \
-             [ -f \"$f\" ] && cp \"$f\" '{data}/lib/' 2>/dev/null || true; \
-           done; \
-         done && \
-         for dir in /usr/local/cuda-{maj}.{min}/lib64 /usr/local/cuda/lib64 /usr/lib/x86_64-linux-gnu; do \
-           for f in \"$dir\"/libcudart.so* \"$dir\"/libcublasLt.so* \"$dir\"/libcublas.so* \"$dir\"/libcurand.so*; do \
-             [ -f \"$f\" ] && cp -L \"$f\" '{data}/lib/' 2>/dev/null || true; \
-           done; \
-         done",
-        maj = cuda_major, min = cuda_minor,
+         {lib_copy}",
+        cuda_setup = cuda_path_setup,
         src = llama_src,
         repo = LLAMA_CPP_REPO,
         version = LLAMA_CPP_VERSION,
+        symlink_cmd = cuda_symlink_cmd,
         cmake_args = cmake_args,
-        data = data_path
+        data = data_path,
+        lib_copy = lib_copy_cmd,
     );
 
     let status = run_distrobox(&vec!["enter".into(), container, "--".into(), "sh".into(), "-c".into(), build_cmd])?;
@@ -510,14 +594,14 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    let cuda_label = if has_nvcc { "source-cuda" } else { "source-cpu" };
+    let backend_label = if has_cuda() && has_nvcc { "source-cuda" } else if use_vulkan { "source-vulkan" } else { "source-cpu" };
     if let Ok(mut cfg) = crate::config::load_config() {
-        cfg.rpc_version = format!("{}-{}", LLAMA_CPP_VERSION, cuda_label);
+        cfg.rpc_version = format!("{}-{}", LLAMA_CPP_VERSION, backend_label);
         cfg.rpc_binary = bin.to_string_lossy().to_string();
         let _ = crate::config::save_config(&cfg);
     }
 
-    println!("  rpc-server built from source in distrobox (CUDA: {})", has_nvcc);
+    println!("  rpc-server built from source in distrobox ({})", build_label);
     Ok(bin)
 }
 
@@ -715,6 +799,7 @@ pub fn build_from_source() -> Result<PathBuf> {
     install_build_tools()?;
 
     let cuda_available = has_cuda();
+    let is_vulkan = !cuda_available && has_vulkan();
     let nvcc_available = if cuda_available {
         if !has_nvcc() {
             match install_cuda_toolkit() {
@@ -732,7 +817,8 @@ pub fn build_from_source() -> Result<PathBuf> {
         false
     };
 
-    println!("Building rpc-server from source (CUDA: {})", nvcc_available);
+    let backend_label = if nvcc_available { "CUDA" } else if is_vulkan { "Vulkan" } else { "CPU" };
+    println!("Building rpc-server from source ({})", backend_label);
 
     let git = find_in_paths("git").context("git not found")?;
     let cmake = find_in_paths("cmake").context("cmake not found")?;
@@ -790,6 +876,8 @@ pub fn build_from_source() -> Result<PathBuf> {
         cmake_cmd.env("LD_LIBRARY_PATH", &ld_path);
         cmake_cmd.arg(format!("-DCUDAToolkit_ROOT={}", cuda_root));
         cmake_cmd.arg(format!("-DCMAKE_CUDA_COMPILER={}/bin/nvcc", cuda_root));
+    } else if is_vulkan {
+        cmake_cmd.arg("-DGGML_VULKAN=ON");
     }
     let status = cmake_cmd.status().context("Failed to run cmake")?;
     if !status.success() {
@@ -827,15 +915,15 @@ pub fn build_from_source() -> Result<PathBuf> {
     println!("  Copying shared libraries...");
     copy_libs(&build, &lib_dir)?;
 
-    let cuda_enabled = nvcc_available;
+    let backend_tag = if nvcc_available { "source-cuda" } else if is_vulkan { "source-vulkan" } else { "source-cpu" };
 
     if let Ok(mut cfg) = crate::config::load_config() {
-        cfg.rpc_version = format!("{}-{}", LLAMA_CPP_VERSION, if cuda_enabled { "source-cuda" } else { "source-cpu" });
+        cfg.rpc_version = format!("{}-{}", LLAMA_CPP_VERSION, backend_tag);
         cfg.rpc_binary = bin.to_string_lossy().to_string();
         let _ = crate::config::save_config(&cfg);
     }
 
-    println!("rpc-server built from source (CUDA: {})", cuda_enabled);
+    println!("rpc-server built from source ({})", backend_label);
     Ok(bin)
 }
 

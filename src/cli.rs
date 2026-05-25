@@ -84,7 +84,7 @@ mod handlers {
 
         let gpu_info = gpu::detect_gpu();
         if gpu_info.has_gpu {
-            println!("GPU: {} ({:.1} GB VRAM)", gpu_info.name, gpu_info.vram_gb);
+            println!("GPU: {} ({:.1} GB VRAM, {})", gpu_info.name, gpu_info.vram_gb, gpu_info.backend);
         } else {
             println!("No GPU detected (CPU-only worker)");
         }
@@ -151,6 +151,7 @@ mod handlers {
             rpc_port,
             gpu:         gpu_info.has_gpu,
             vram_gb:     gpu_info.vram_gb,
+            gpu_backend: gpu_info.backend.to_string(),
             rpc_binary:  rpc_path.to_string_lossy().to_string(),
             rpc_version,
             username:    username.to_string(),

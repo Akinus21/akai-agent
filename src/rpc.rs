@@ -110,31 +110,51 @@ pub async fn ensure_rpc_server() -> Result<PathBuf> {
     let lib_dir = crate::config::data_dir().join("lib");
 
     #[cfg(target_os = "linux")]
-    let has_gpu = crate::build::needs_source_build();
+    let needs_build = crate::build::needs_source_build();
     #[cfg(not(target_os = "linux"))]
-    let has_gpu = false;
+    let needs_build = false;
 
-    if has_gpu {
-        println!("GPU detected — building rpc-server with CUDA support...");
-        if lib_dir.exists() {
-            std::fs::remove_dir_all(&lib_dir).ok();
-        }
-        std::fs::remove_file(&path).ok();
-        std::fs::create_dir_all(path.parent().unwrap())?;
-        std::fs::create_dir_all(&lib_dir)?;
+    if needs_build {
+        let has_cuda = crate::build::has_cuda();
+        let is_vulkan = !has_cuda && crate::build::has_vulkan();
 
-        match crate::build::build_from_source() {
-            Ok(p) => return Ok(p),
-            Err(e) => eprintln!("Source build failed: {}. Trying pre-built CUDA bundle.", e),
-        }
-
-        match download_cuda_bundle().await {
-            Ok(()) => {
-                if path.exists() {
-                    return Ok(path);
-                }
+        if is_vulkan {
+            println!("Vulkan GPU detected — building rpc-server with Vulkan support...");
+            if lib_dir.exists() {
+                std::fs::remove_dir_all(&lib_dir).ok();
             }
-            Err(e) => eprintln!("Pre-built CUDA bundle download failed: {}. Falling back to CPU.", e),
+            std::fs::remove_file(&path).ok();
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            std::fs::create_dir_all(&lib_dir)?;
+
+            match crate::build::build_from_source() {
+                Ok(p) => return Ok(p),
+                Err(e) => eprintln!("Vulkan source build failed: {}. Trying CPU fallback.", e),
+            }
+
+            println!("Falling back to CPU-only rpc-server...");
+        } else {
+            println!("GPU detected — building rpc-server with CUDA support...");
+            if lib_dir.exists() {
+                std::fs::remove_dir_all(&lib_dir).ok();
+            }
+            std::fs::remove_file(&path).ok();
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            std::fs::create_dir_all(&lib_dir)?;
+
+            match crate::build::build_from_source() {
+                Ok(p) => return Ok(p),
+                Err(e) => eprintln!("Source build failed: {}. Trying pre-built CUDA bundle.", e),
+            }
+
+            match download_cuda_bundle().await {
+                Ok(()) => {
+                    if path.exists() {
+                        return Ok(path);
+                    }
+                }
+                Err(e) => eprintln!("Pre-built CUDA bundle download failed: {}. Falling back to CPU.", e),
+            }
         }
     }
 
@@ -380,6 +400,9 @@ pub fn spawn_rpc_server(binary: &Path, port: u16) -> Result<std::process::Child>
             "/usr/lib",
             "/lib/x86_64-linux-gnu",
             "/lib64",
+            "/usr/local/lib",
+            "/usr/lib/x86_64-linux-gnu/dri",
+            "/usr/lib/x86_64-linux-gnu/vulkan",
         ] {
             if std::path::Path::new(dir).exists() {
                 ld_path.push_str(&format!(":{}", dir));
