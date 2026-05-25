@@ -1,6 +1,4 @@
 use clap::{Parser, Subcommand};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "akai-agent")]
@@ -63,6 +61,8 @@ pub async fn run() -> anyhow::Result<()> {
 
 mod handlers {
     use anyhow::{Context, Result};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
     use crate::{auth, config, gpu, queue_client::QueueClient, rpc, wireguard};
 

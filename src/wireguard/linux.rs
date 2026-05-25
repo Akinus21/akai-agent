@@ -2,7 +2,6 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
 use crate::queue_client::ProvisionResponse;
 
 fn iface_name(_wg_ip: &str) -> &'static str {
