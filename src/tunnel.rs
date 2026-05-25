@@ -223,6 +223,14 @@ impl TunnelClient {
                         }
                     }
 
+                    DATA if frame.payload.len() > 4 => {
+                        let conn_id = u32::from_be_bytes(frame.payload[..4].try_into()?);
+                        let map = conns.lock().await;
+                        if let Some(conn) = map.get(&conn_id) {
+                            let _ = conn.write_tx.send(frame.payload[4..].to_vec()).await;
+                        }
+                    }
+
                     PONG => {}
 
                     _ => {
