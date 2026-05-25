@@ -25,17 +25,6 @@ pub enum Commands {
         rpc_port: u16,
     },
 
-    TunnelInit {
-        #[arg(long)]
-        queue: String,
-
-        #[arg(long)]
-        username: String,
-
-        #[arg(long)]
-        name: Option<String>,
-    },
-
     Start,
 
     Install,
@@ -50,8 +39,6 @@ pub async fn run() -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { queue, username, name, rpc_port } =>
             handlers::init(&queue, &username, name, rpc_port).await,
-        Commands::TunnelInit { queue, username, name } =>
-            handlers::tunnel_init(&queue, &username, name).await,
         Commands::Start      => handlers::start().await,
         Commands::Install    => handlers::install().await,
         Commands::Status     => handlers::status().await,
@@ -163,6 +150,13 @@ mod handlers {
         println!("Config saved to {}", config::config_path().display());
 
         println!();
+        println!("Fetching tunnel certificates...");
+        match fetch_tunnel_certs(&queue_url, &username, &worker_name).await {
+            Ok(()) => {},
+            Err(e) => eprintln!("Tunnel cert fetch failed: {}. Run `akai-agent start` to retry.", e),
+        }
+
+        println!();
         println!("Initialization complete!");
         println!("   Run:  akai-agent start");
         println!("   Or:   sudo akai-agent install");
@@ -220,11 +214,11 @@ mod handlers {
         if use_tunnel {
             let cert_dir = config::data_dir().join("tunnel-certs");
             let ca = std::fs::read(cert_dir.join("ca.crt"))
-                .context("tunnel CA cert not found — run `akai-agent tunnel-init` first")?;
+                .context("tunnel CA cert not found — run `akai-agent init` first")?;
             let wcrt = std::fs::read(cert_dir.join("worker.crt"))
-                .context("tunnel worker cert not found — run `akai-agent tunnel-init` first")?;
+                .context("tunnel worker cert not found — run `akai-agent init` first")?;
             let wkey = std::fs::read(cert_dir.join("worker.key"))
-                .context("tunnel worker key not found — run `akai-agent tunnel-init` first")?;
+                .context("tunnel worker key not found — run `akai-agent init` first")?;
             let tc = crate::tunnel::TunnelClient::new(
                 &cfg.tunnel_host,
                 cfg.tunnel_port,
@@ -357,49 +351,20 @@ mod handlers {
         }
     }
 
-    pub async fn tunnel_init(
-        queue_url: &str,
-        username:  &str,
-        name:      Option<String>,
-    ) -> Result<()> {
-        let worker_name = name.unwrap_or_else(||
-            hostname::get()
-                .map(|h| h.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "akai-worker".to_string())
-        );
-
+    async fn fetch_tunnel_certs(queue_url: &str, username: &str, worker_name: &str) -> Result<()> {
         let cert_dir = config::data_dir().join("tunnel-certs");
         let ca_path = cert_dir.join("ca.crt");
         let wcrt_path = cert_dir.join("worker.crt");
         let wkey_path = cert_dir.join("worker.key");
 
         if ca_path.exists() && wcrt_path.exists() && wkey_path.exists() {
-            println!("Tunnel certs already exist at {}", cert_dir.display());
-            println!("To re-download, delete them first:");
-            println!("  rm -rf {}", cert_dir.display());
+            println!("  Tunnel certs already exist at {}", cert_dir.display());
             return Ok(());
         }
 
-        println!("Fetching tunnel certs from {}...", queue_url);
-
         let client = QueueClient::new(queue_url, username);
-        let (_, public_key) = auth::ensure_keypair()?;
-
-        let certs = match client.fetch_tunnel_certs().await {
-            Ok(c) => {
-                println!("Authenticated with existing key.");
-                c
-            }
-            Err(_) => {
-                println!("Auth required — triggering Duo 2FA...");
-                let provision = client.auth_duo(&worker_name, &public_key).await
-                    .context("Duo 2FA failed")?;
-                println!("Duo approved. WireGuard provisioned (IP: {})", provision.wg_ip.unwrap_or_default());
-                println!("Fetching tunnel certs with authenticated key...");
-                client.fetch_tunnel_certs().await
-                    .context("Failed to fetch tunnel certs after auth")?
-            }
-        };
+        let certs = client.fetch_tunnel_certs().await
+            .context("Failed to fetch tunnel certs")?;
 
         std::fs::create_dir_all(&cert_dir)
             .context("failed to create tunnel-certs directory")?;
@@ -414,11 +379,10 @@ mod handlers {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&wkey_path, std::fs::Permissions::from_mode(0o600))
+            std::fs::set_permissions(&wkey_path, std::fs::Permissions::from_mode(0x600))
                 .ok();
         }
 
-        println!("Tunnel certs saved to {}", cert_dir.display());
         println!("  CA:     {}", ca_path.display());
         println!("  Cert:   {}", wcrt_path.display());
         println!("  Key:    {}", wkey_path.display());
@@ -430,8 +394,6 @@ mod handlers {
         cfg.tunnel_port = certs.tunnel_port;
         config::save_config(&cfg)?;
 
-        println!("Config updated with tunnel server: {}:{}", cfg.tunnel_host, cfg.tunnel_port);
-        println!("Run `akai-agent start` to connect via mTLS tunnel");
         Ok(())
     }
 

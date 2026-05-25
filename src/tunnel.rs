@@ -211,6 +211,9 @@ impl TunnelClient {
                         let (write_tx, write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
                         conns.lock().await.insert(conn_id, ConnState { write_tx: write_tx.clone() });
 
+                        let active = conns.lock().await.len();
+                        println!("job received: inference conn #{conn_id} (active: {active})");
+
                         tokio::spawn(async move {
                             if let Err(e) = serve_conn(conn_id, rpc_port, w, c, write_rx).await {
                                 tracing::debug!("conn {} ended: {e}", conn_id);
@@ -303,5 +306,6 @@ async fn serve_conn(
     }
 
     conns.lock().await.remove(&conn_id);
+    println!("job done: inference conn #{conn_id} closed");
     Ok(())
 }
