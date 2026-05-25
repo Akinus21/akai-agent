@@ -8,6 +8,7 @@ use crate::{auth, config::Config};
 pub struct QueueClient {
     base_url:   String,
     username:   String,
+    device_id:  String,
     client:     Client,
 }
 
@@ -89,9 +90,13 @@ pub struct TunnelCertsResponse {
 
 impl QueueClient {
     pub fn new(base_url: &str, username: &str) -> Self {
+        let device_id = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             username: username.to_string(),
+            device_id,
             client:   Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
@@ -122,6 +127,7 @@ impl QueueClient {
         let (ts, sig) = self.sign(method, path, body)?;
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("X-Akai-Username", self.username.parse().context("Invalid username header")?);
+        headers.insert("X-Akai-Device-Id", self.device_id.parse().context("Invalid device ID header")?);
         headers.insert("X-Akai-Timestamp", ts.parse().context("Invalid timestamp header")?);
         headers.insert("X-Akai-Signature", sig.parse().context("Invalid signature header")?);
         Ok(headers)
