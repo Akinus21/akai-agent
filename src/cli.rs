@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "akai-agent")]
@@ -177,6 +179,8 @@ mod handlers {
 
         let use_tunnel = !cfg.tunnel_host.is_empty();
 
+        let tunnel_connected: Arc<AtomicBool> = Arc::new(AtomicBool::new(!use_tunnel));
+
         if use_tunnel {
             println!("  Tunnel:    {}:{}", cfg.tunnel_host, cfg.tunnel_port);
         } else {
@@ -220,7 +224,7 @@ mod handlers {
                 .context("tunnel worker cert not found — run `akai-agent tunnel-init` first")?;
             let wkey = std::fs::read(cert_dir.join("worker.key"))
                 .context("tunnel worker key not found — run `akai-agent tunnel-init` first")?;
-            let tunnel_client = crate::tunnel::TunnelClient::new(
+            let tc = crate::tunnel::TunnelClient::new(
                 &cfg.tunnel_host,
                 cfg.tunnel_port,
                 &cfg.worker_id,
@@ -228,9 +232,10 @@ mod handlers {
                 ca,
                 wcrt,
                 wkey,
+                tunnel_connected.clone(),
             );
             tokio::spawn(async move {
-                if let Err(e) = tunnel_client.run().await {
+                if let Err(e) = tc.run().await {
                     tracing::error!("tunnel client failed: {e}");
                 }
             });
@@ -246,6 +251,11 @@ mod handlers {
         loop {
             tokio::select! {
                 _ = heartbeat_tick.tick() => {
+                    if use_tunnel && !tunnel_connected.load(Ordering::Relaxed) {
+                        eprintln!("mTLS tunnel not connected — skipping heartbeat");
+                        continue;
+                    }
+
                     if !use_tunnel && !wireguard::check_tunnel(&cfg.wg_ip) {
                         eprintln!("WireGuard tunnel is down — pausing heartbeats until re-established");
                         match wireguard::ensure_tunnel(&cfg.wg_ip) {
@@ -268,7 +278,8 @@ mod handlers {
                         &cfg.worker_id, cfg.gpu, cfg.vram_gb, cfg.rpc_port
                     ).await {
                         Ok(resp) => {
-                            tracing::info!("Heartbeat OK");
+                            let tunnel_ok = if use_tunnel { tunnel_connected.load(Ordering::Relaxed) } else { true };
+                            tracing::info!("Heartbeat OK (tunnel={})", tunnel_ok);
                             let my_commit = rpc::rpc_commit_hash();
                             if !resp.hub_commit.is_empty() && !my_commit.is_empty() && my_commit != resp.hub_commit {
                                 eprintln!("Hub commit mismatch: hub={}, local={}. Rebuilding rpc-server...", resp.hub_commit, my_commit);

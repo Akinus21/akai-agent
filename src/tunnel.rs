@@ -1,4 +1,7 @@
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
+use std::io::Cursor;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -7,8 +10,6 @@ use tokio_rustls::rustls::crypto::aws_lc_rs::default_provider;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
-use std::collections::HashMap;
-use std::io::Cursor;
 
 const MAGIC: &[u8; 8] = b"AKAITUNL";
 const V1: u8 = 1;
@@ -59,6 +60,7 @@ pub struct TunnelClient {
     client_cert_pem: Vec<u8>,
     client_key_pem: Vec<u8>,
     conns: Arc<Mutex<HashMap<u32, ConnState>>>,
+    connected: Arc<AtomicBool>,
 }
 
 impl TunnelClient {
@@ -70,6 +72,7 @@ impl TunnelClient {
         ca_cert_pem: Vec<u8>,
         client_cert_pem: Vec<u8>,
         client_key_pem: Vec<u8>,
+        connected: Arc<AtomicBool>,
     ) -> Self {
         Self {
             server_host: server_host.to_string(),
@@ -80,6 +83,7 @@ impl TunnelClient {
             client_cert_pem,
             client_key_pem,
             conns: Arc::new(Mutex::new(HashMap::new())),
+            connected,
         }
     }
 
@@ -87,8 +91,10 @@ impl TunnelClient {
         let connector = self.build_tls_connector()
             .map_err(|e| anyhow::anyhow!("TLS config failed: {e}"))?;
         let conns = self.conns.clone();
+        let connected = self.connected.clone();
 
         loop {
+            connected.store(false, Ordering::Relaxed);
             match self.connect_and_serve(&connector).await {
                 Ok(()) => {
                     eprintln!("tunnel disconnected, reconnecting in 5s...");
@@ -145,6 +151,7 @@ impl TunnelClient {
         let worker_id = self.worker_id.clone();
         let rpc_port = self.rpc_port;
         let conns = self.conns.clone();
+        let connected = self.connected.clone();
 
         eprintln!("tunnel: connecting to {}:{}...", server_host, self.server_port);
 
@@ -172,6 +179,7 @@ impl TunnelClient {
         writer.write_all(&handshake).await?;
         writer.flush().await?;
 
+        connected.store(true, Ordering::Relaxed);
         println!("tunnel connected to {}:{}", server_host, self.server_port);
 
         let writer = Arc::new(Mutex::new(writer));
