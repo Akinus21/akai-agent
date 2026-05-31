@@ -100,16 +100,7 @@ mod handlers {
             Err(e) => return Err(e),
         };
 
-        let wg_ip = provision.wg_ip.as_ref()
-            .context("wg_ip missing from provision response")?;
-        let peer_id = provision.peer_id.as_ref()
-            .context("peer_id missing from provision response")?;
-        println!("Authenticated. Assigned WireGuard IP: {}", wg_ip);
-
-        println!("Configuring WireGuard...");
-        wireguard::configure(&provision).await
-            .context("WireGuard configuration failed")?;
-        println!("WireGuard tunnel up ({})", wg_ip);
+        let worker_id = worker_name.clone();
 
         println!("Downloading rpc-server...");
         let rpc_path = rpc::ensure_rpc_server().await
@@ -117,20 +108,18 @@ mod handlers {
         let rpc_version = rpc::current_version();
         println!("rpc-server ready at {}", rpc_path.display());
 
-        let worker_id = worker_name.clone();
-        let wg_pub = crate::wireguard::get_wg_public_key();
-        if wg_pub.is_none() {
-            eprintln!("Warning: could not derive WireGuard public key — tunnel re-provisioning may fail");
-        }
+        let wg_ip = provision.wg_ip.clone().unwrap_or_default();
+        let peer_id = provision.peer_id.clone().unwrap_or_default();
+
         match client.register(
             &worker_id,
             &worker_name,
-            wg_ip,
-            peer_id,
+            &wg_ip,
+            &peer_id,
             gpu_info.has_gpu,
             gpu_info.vram_gb,
             rpc_port,
-            wg_pub,
+            None,
         ).await {
             Ok(_)  => println!("Registered with queue"),
             Err(e) => eprintln!("Registration failed: {}. Retry with `akai-agent start`.", e),
