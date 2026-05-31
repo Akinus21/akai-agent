@@ -107,6 +107,11 @@ pub fn rpc_commit_hash() -> String {
 
 pub async fn ensure_rpc_server() -> Result<PathBuf> {
     let path = rpc_binary_path();
+
+    if path.exists() {
+        return Ok(path);
+    }
+
     let lib_dir = crate::config::data_dir().join("lib");
 
     #[cfg(target_os = "linux")]
