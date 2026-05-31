@@ -31,6 +31,8 @@ pub enum Commands {
         hub_port: Option<u16>,
     },
 
+    Clean,
+
     Start,
 
     Install,
@@ -45,10 +47,11 @@ pub async fn run() -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { queue, username, name, rpc_port, hub_wg_ip, hub_port } =>
             handlers::init(&queue, &username, name, rpc_port, hub_wg_ip, hub_port).await,
-        Commands::Start      => handlers::start().await,
-        Commands::Install    => handlers::install().await,
-        Commands::Status     => handlers::status().await,
-        Commands::UpdateRpc  => handlers::update_rpc().await,
+        Commands::Clean       => handlers::clean(),
+        Commands::Start       => handlers::start().await,
+        Commands::Install     => handlers::install().await,
+        Commands::Status      => handlers::status().await,
+        Commands::UpdateRpc   => handlers::update_rpc().await,
     }
 }
 
@@ -58,6 +61,30 @@ mod handlers {
     use std::sync::Arc;
     use std::time::Duration;
     use crate::{auth, config, gpu, queue_client::QueueClient, rpc, wireguard};
+
+    pub fn clean() -> Result<()> {
+        println!("Cleaning up akai-agent data...");
+
+        let config_dirs = [
+            "/root/.config/akai-agent",
+            "/root/.local/share/akai-agent",
+        ];
+        for dir in &config_dirs {
+            if std::path::Path::new(dir).exists() {
+                std::fs::remove_dir_all(dir)?;
+                println!("  Removed {}", dir);
+            }
+        }
+
+        let wireguard_conf = "/etc/wireguard/wg0.conf";
+        if std::path::Path::new(wireguard_conf).exists() {
+            std::fs::remove_file(wireguard_conf)?;
+            println!("  Removed {}", wireguard_conf);
+        }
+
+        println!("Clean complete.");
+        Ok(())
+    }
 
     pub async fn init(
         queue_url: &str,
