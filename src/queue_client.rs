@@ -46,6 +46,7 @@ struct HeartbeatRequest {
     vram_gb:  f64,
     rpc_port:  u16,
     alive:     bool,
+    hub_reachable: bool,
     #[serde(default)]
     models:   Vec<String>,
 }
@@ -215,8 +216,9 @@ impl QueueClient {
 
     pub async fn heartbeat(
         &self, worker_id: &str, gpu: bool, vram_gb: f64, rpc_port: u16,
+        hub_reachable: bool,
     ) -> Result<HeartbeatResponse> {
-        let body = serde_json::to_vec(&HeartbeatRequest { gpu, vram_gb, rpc_port, alive: true, models: Vec::new() })?;
+        let body = serde_json::to_vec(&HeartbeatRequest { gpu, vram_gb, rpc_port, alive: true, hub_reachable, models: Vec::new() })?;
         let path = format!("/workers/{}/heartbeat", worker_id);
         let headers = self.auth_headers("POST", &path, &body)?;
 

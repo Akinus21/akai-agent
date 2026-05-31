@@ -23,6 +23,9 @@ pub enum Commands {
 
         #[arg(long, default_value = "50052")]
         rpc_port: u16,
+
+        #[arg(long)]
+        hub_wg_ip: Option<String>,
     },
 
     Start,
@@ -37,8 +40,8 @@ pub enum Commands {
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Init { queue, username, name, rpc_port } =>
-            handlers::init(&queue, &username, name, rpc_port).await,
+        Commands::Init { queue, username, name, rpc_port, hub_wg_ip } =>
+            handlers::init(&queue, &username, name, rpc_port, hub_wg_ip).await,
         Commands::Start      => handlers::start().await,
         Commands::Install    => handlers::install().await,
         Commands::Status     => handlers::status().await,
@@ -58,6 +61,7 @@ mod handlers {
         username:  &str,
         name:      Option<String>,
         rpc_port:  u16,
+        hub_wg_ip: Option<String>,
     ) -> Result<()> {
         let worker_name = name.unwrap_or_else(||
             hostname::get()
@@ -145,6 +149,7 @@ mod handlers {
             public_key,
             tunnel_host: String::new(),
             tunnel_port: 0,
+            hub_wg_ip: hub_wg_ip.unwrap_or_default(),
         };
         config::save_config(&cfg)?;
         println!("Config saved to {}", config::config_path().display());
@@ -171,6 +176,9 @@ mod handlers {
         println!("  Worker:    {}", cfg.worker_id);
         println!("  Queue:     {}", cfg.queue_url);
         println!("  RPC port:  {}", cfg.rpc_port);
+        if !cfg.hub_wg_ip.is_empty() {
+            println!("  Hub WG:    {}", cfg.hub_wg_ip);
+        }
 
         let use_tunnel = !cfg.tunnel_host.is_empty();
 
@@ -269,12 +277,24 @@ mod handlers {
                         println!("rpc-server restarted on :{}", cfg.rpc_port);
                     }
 
+                    let hub_reachable = if cfg.hub_wg_ip.is_empty() {
+                        true
+                    } else {
+                        tokio::net::TcpStream::connect(format!("{}:{}", cfg.hub_wg_ip, cfg.rpc_port))
+                            .await
+                            .is_ok()
+                    };
+
+                    if !hub_reachable {
+                        eprintln!("FAIL: hub unreachable (wg={}:{})", cfg.hub_wg_ip, cfg.rpc_port);
+                    }
+
                     match client.heartbeat(
-                        &cfg.worker_id, cfg.gpu, cfg.vram_gb, cfg.rpc_port
+                        &cfg.worker_id, cfg.gpu, cfg.vram_gb, cfg.rpc_port, hub_reachable
                     ).await {
                         Ok(resp) => {
                             let tunnel_ok = if use_tunnel { tunnel_connected.load(Ordering::Relaxed) } else { true };
-                            tracing::info!("Heartbeat OK (tunnel={})", tunnel_ok);
+                            tracing::info!("Heartbeat OK (tunnel={}, hub={})", tunnel_ok, hub_reachable);
                             let my_commit = rpc::rpc_commit_hash();
                             if !resp.hub_commit.is_empty() && !my_commit.is_empty() && my_commit != resp.hub_commit {
                                 eprintln!("Hub commit mismatch: hub={}, local={}. Rebuilding rpc-server...", resp.hub_commit, my_commit);
