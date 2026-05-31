@@ -72,7 +72,7 @@ mod handlers {
                 .map(|h| h.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "akai-worker".to_string())
         );
-        let worker_id = format!("{}/{}", username, device_name);
+        let worker_id = format!("{}:{}", username, device_name);
 
         println!("Initializing akai-agent for user \"{}\" as \"{}\"", username, worker_id);
 
@@ -124,7 +124,7 @@ mod handlers {
             Err(e) => eprintln!("Registration failed: {}. Retry with `akai-agent start`.", e),
         }
 
-        let cfg = config::Config {
+        let mut cfg = config::Config {
             queue_url:   queue_url.to_string(),
             api_key:     String::new(),
             worker_id:   worker_id.clone(),
@@ -144,15 +144,16 @@ mod handlers {
             hub_wg_ip: hub_wg_ip.unwrap_or_default(),
             hub_port: hub_port.unwrap_or(8080),
         };
-        config::save_config(&cfg)?;
-        println!("Config saved to {}", config::config_path().display());
 
         println!();
         println!("Fetching tunnel certificates...");
-        match fetch_tunnel_certs(&queue_url, &username, &device_name).await {
+        match fetch_tunnel_certs(&mut cfg, &queue_url, &username).await {
             Ok(()) => {},
             Err(e) => eprintln!("Tunnel cert fetch failed: {}. Run `akai-agent start` to retry.", e),
         }
+
+        config::save_config(&cfg)?;
+        println!("Config saved to {}", config::config_path().display());
 
         println!();
         println!("Initialization complete!");
@@ -354,7 +355,7 @@ mod handlers {
         }
     }
 
-    async fn fetch_tunnel_certs(queue_url: &str, username: &str, _device_name: &str) -> Result<()> {
+    async fn fetch_tunnel_certs(cfg: &mut config::Config, queue_url: &str, username: &str) -> Result<()> {
         let cert_dir = config::data_dir().join("tunnel-certs");
         let ca_path = cert_dir.join("ca.crt");
         let wcrt_path = cert_dir.join("worker.crt");
@@ -362,6 +363,15 @@ mod handlers {
 
         if ca_path.exists() && wcrt_path.exists() && wkey_path.exists() {
             println!("  Tunnel certs already exist at {}", cert_dir.display());
+            if cfg.tunnel_host.is_empty() || cfg.tunnel_port == 0 {
+                let client = QueueClient::new(queue_url, username);
+                let certs = client.fetch_tunnel_certs().await
+                    .context("Failed to fetch tunnel server info")?;
+                cfg.tunnel_host = certs.tunnel_host;
+                cfg.tunnel_port = certs.tunnel_port;
+                config::save_config(cfg)?;
+                println!("  Updated tunnel server: {}:{}", cfg.tunnel_host, cfg.tunnel_port);
+            }
             return Ok(());
         }
 
@@ -391,11 +401,9 @@ mod handlers {
         println!("  Key:    {}", wkey_path.display());
         println!("  Server: {}:{}", certs.tunnel_host, certs.tunnel_port);
 
-        let mut cfg = config::load_config()
-            .context("Config not found. Run `akai-agent init` first.")?;
         cfg.tunnel_host = certs.tunnel_host;
         cfg.tunnel_port = certs.tunnel_port;
-        config::save_config(&cfg)?;
+        config::save_config(cfg)?;
 
         Ok(())
     }
