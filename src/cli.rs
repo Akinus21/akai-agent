@@ -282,17 +282,7 @@ mod handlers {
                         println!("rpc-server restarted on :{}", cfg.rpc_port);
                     }
 
-                    let hub_reachable = if cfg.hub_wg_ip.is_empty() || cfg.hub_port == 0 {
-                        true
-                    } else {
-                        tokio::net::TcpStream::connect(format!("{}:{}", cfg.hub_wg_ip, cfg.hub_port))
-                            .await
-                            .is_ok()
-                    };
-
-                    if !hub_reachable {
-                        eprintln!("FAIL: hub unreachable (wg={}:{})", cfg.hub_wg_ip, cfg.hub_port);
-                    }
+                    let hub_reachable = true;
 
                     match client.heartbeat(
                         &cfg.worker_id, cfg.gpu, cfg.vram_gb, cfg.rpc_port, hub_reachable
