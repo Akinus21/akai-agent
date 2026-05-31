@@ -26,6 +26,9 @@ pub enum Commands {
 
         #[arg(long)]
         hub_wg_ip: Option<String>,
+
+        #[arg(long)]
+        hub_port: Option<u16>,
     },
 
     Start,
@@ -40,8 +43,8 @@ pub enum Commands {
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Init { queue, username, name, rpc_port, hub_wg_ip } =>
-            handlers::init(&queue, &username, name, rpc_port, hub_wg_ip).await,
+        Commands::Init { queue, username, name, rpc_port, hub_wg_ip, hub_port } =>
+            handlers::init(&queue, &username, name, rpc_port, hub_wg_ip, hub_port).await,
         Commands::Start      => handlers::start().await,
         Commands::Install    => handlers::install().await,
         Commands::Status     => handlers::status().await,
@@ -62,6 +65,7 @@ mod handlers {
         name:      Option<String>,
         rpc_port:  u16,
         hub_wg_ip: Option<String>,
+        hub_port: Option<u16>,
     ) -> Result<()> {
         let worker_name = name.unwrap_or_else(||
             hostname::get()
@@ -150,6 +154,7 @@ mod handlers {
             tunnel_host: String::new(),
             tunnel_port: 0,
             hub_wg_ip: hub_wg_ip.unwrap_or_default(),
+            hub_port: hub_port.unwrap_or(8080),
         };
         config::save_config(&cfg)?;
         println!("Config saved to {}", config::config_path().display());
@@ -177,7 +182,7 @@ mod handlers {
         println!("  Queue:     {}", cfg.queue_url);
         println!("  RPC port:  {}", cfg.rpc_port);
         if !cfg.hub_wg_ip.is_empty() {
-            println!("  Hub WG:    {}", cfg.hub_wg_ip);
+            println!("  Hub WG:    {}:{}", cfg.hub_wg_ip, cfg.hub_port);
         }
 
         let use_tunnel = !cfg.tunnel_host.is_empty();
@@ -277,16 +282,16 @@ mod handlers {
                         println!("rpc-server restarted on :{}", cfg.rpc_port);
                     }
 
-                    let hub_reachable = if cfg.hub_wg_ip.is_empty() {
+                    let hub_reachable = if cfg.hub_wg_ip.is_empty() || cfg.hub_port == 0 {
                         true
                     } else {
-                        tokio::net::TcpStream::connect(format!("{}:{}", cfg.hub_wg_ip, cfg.rpc_port))
+                        tokio::net::TcpStream::connect(format!("{}:{}", cfg.hub_wg_ip, cfg.hub_port))
                             .await
                             .is_ok()
                     };
 
                     if !hub_reachable {
-                        eprintln!("FAIL: hub unreachable (wg={}:{})", cfg.hub_wg_ip, cfg.rpc_port);
+                        eprintln!("FAIL: hub unreachable (wg={}:{})", cfg.hub_wg_ip, cfg.hub_port);
                     }
 
                     match client.heartbeat(

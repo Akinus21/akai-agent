@@ -27,6 +27,8 @@ pub struct Config {
     pub tunnel_port: u16,
     #[serde(default)]
     pub hub_wg_ip: String,
+    #[serde(default)]
+    pub hub_port: u16,
 }
 
 pub fn config_path() -> PathBuf {
