@@ -67,13 +67,14 @@ mod handlers {
         hub_wg_ip: Option<String>,
         hub_port: Option<u16>,
     ) -> Result<()> {
-        let worker_name = name.unwrap_or_else(||
+        let device_name = name.unwrap_or_else(||
             hostname::get()
                 .map(|h| h.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "akai-worker".to_string())
         );
+        let worker_id = format!("{}/{}", username, device_name);
 
-        println!("Initializing akai-agent as \"{}\"", worker_name);
+        println!("Initializing akai-agent for user \"{}\" as \"{}\"", username, worker_id);
 
         let (_, public_key) = auth::ensure_keypair()?;
 
@@ -87,20 +88,18 @@ mod handlers {
         let client = QueueClient::new(queue_url, username);
         println!("Authenticating as '{}' with queue at {}...", username, queue_url);
 
-        let provision = match client.auth_register(&worker_name, &public_key).await {
+        let provision = match client.auth_register(&device_name, &public_key).await {
             Ok(p) => {
                 println!("Authenticated with existing key.");
                 p
             }
             Err(e) if e.to_string().starts_with("AUTH_REQUIRED:") => {
                 println!("New worker — Duo 2FA required.");
-                client.auth_duo(&worker_name, &public_key).await
+                client.auth_duo(&device_name, &public_key).await
                     .context("Duo 2FA failed")?
             }
             Err(e) => return Err(e),
         };
-
-        let worker_id = worker_name.clone();
 
         println!("Downloading rpc-server...");
         let rpc_path = rpc::ensure_rpc_server().await
@@ -113,7 +112,7 @@ mod handlers {
 
         match client.register(
             &worker_id,
-            &worker_name,
+            &device_name,
             &wg_ip,
             &peer_id,
             gpu_info.has_gpu,
@@ -129,7 +128,7 @@ mod handlers {
             queue_url:   queue_url.to_string(),
             api_key:     String::new(),
             worker_id:   worker_id.clone(),
-            worker_name: worker_name.clone(),
+            worker_name: device_name.clone(),
             wg_ip:       wg_ip.clone(),
             wg_peer_id:  peer_id.clone(),
             rpc_port,
@@ -150,7 +149,7 @@ mod handlers {
 
         println!();
         println!("Fetching tunnel certificates...");
-        match fetch_tunnel_certs(&queue_url, &username, &worker_name).await {
+        match fetch_tunnel_certs(&queue_url, &username, &device_name).await {
             Ok(()) => {},
             Err(e) => eprintln!("Tunnel cert fetch failed: {}. Run `akai-agent start` to retry.", e),
         }
@@ -355,7 +354,7 @@ mod handlers {
         }
     }
 
-    async fn fetch_tunnel_certs(queue_url: &str, username: &str, worker_name: &str) -> Result<()> {
+    async fn fetch_tunnel_certs(queue_url: &str, username: &str, _device_name: &str) -> Result<()> {
         let cert_dir = config::data_dir().join("tunnel-certs");
         let ca_path = cert_dir.join("ca.crt");
         let wcrt_path = cert_dir.join("worker.crt");
