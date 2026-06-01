@@ -35,6 +35,23 @@ pub enum Commands {
 
     Start,
 
+    StartWorker {
+        #[arg(long)]
+        hub_addr: String,
+
+        #[arg(long)]
+        worker_id: String,
+
+        #[arg(long)]
+        model_path: String,
+
+        #[arg(long, default_value = "0")]
+        layer_offset: usize,
+
+        #[arg(long, default_value = "32")]
+        num_layers: usize,
+    },
+
     Install,
 
     Status,
@@ -60,6 +77,8 @@ pub async fn run() -> anyhow::Result<()> {
             handlers::init(&queue, &username, name, rpc_port, hub_wg_ip, hub_port).await,
         Commands::Clean       => handlers::clean(),
         Commands::Start       => handlers::start().await,
+        Commands::StartWorker { hub_addr, worker_id, model_path, layer_offset, num_layers } =>
+            handlers::start_worker(&hub_addr, &worker_id, &model_path, layer_offset, num_layers).await,
         Commands::Install     => handlers::install().await,
         Commands::Status      => handlers::status().await,
         Commands::UpdateRpc   => handlers::update_rpc().await,
@@ -74,7 +93,7 @@ mod handlers {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
-    use crate::{auth, config, gpu, petals, queue_client::QueueClient, rpc, wireguard};
+    use crate::{auth, config, gpu, petals, queue_client::QueueClient, rpc, wireguard, worker};
 
     pub fn clean() -> Result<()> {
         println!("Cleaning up akai-agent data...");
@@ -428,6 +447,28 @@ mod handlers {
                 }
             }
         }
+    }
+
+    pub async fn start_worker(
+        hub_addr: &str,
+        worker_id: &str,
+        model_path: &str,
+        layer_offset: usize,
+        num_layers: usize,
+    ) -> Result<()> {
+        let gpu_info = gpu::detect_gpu();
+
+        let cfg = worker::WorkerConfig {
+            hub_addr: hub_addr.to_string(),
+            worker_id: worker_id.to_string(),
+            has_gpu: gpu_info.has_gpu,
+            vram_gb: gpu_info.vram_gb as f32,
+            layer_offset,
+            num_layers,
+            model_path: model_path.to_string(),
+        };
+
+        worker::run_worker(cfg).await
     }
 
     async fn fetch_tunnel_certs(cfg: &mut config::Config, queue_url: &str, username: &str) -> Result<()> {

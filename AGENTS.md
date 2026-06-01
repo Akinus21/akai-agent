@@ -4,7 +4,7 @@
 Repo: `Akinus21/akai-agent`
 Binary: `akai-agent`
 Purpose: Cross-platform Rust binary that turns any GPU machine into a remote
-         RPC worker for the akai-net distributed inference system.
+         worker for the akai-net distributed inference system.
 
 ## SSH Key
 All git operations use: `/config/.ssh/github`
@@ -41,30 +41,73 @@ docker logs akai-net
 docker exec akai-net switch-model -f /models/foo.gguf
 ```
 
-## How the System Works
-akai-agent (this binary)
-↓  init: provision WireGuard, download rpc-server, register
-↓  start: heartbeat every 30s, respawn rpc-server if dead
-ollama-queue (Python FastAPI on VPS)
-↓  holds live worker registry
-↓  GET /workers returns rpc_string e.g. "10.8.0.2:50052"
-akai-net (Docker container on VPS)
-↓  queries ollama-queue on startup for live workers
-↓  launches: llama-server --rpc 10.8.0.2:50052 --model /models/...
-↓  exposes /v1/chat/completions on :8080
-ollama-queue proxy
-↓  routes "akai/" requests → akai-net:8080
-↓  routes "cloud/" requests → Cloud Ollama:11434
+## New Architecture (v2)
 
-## Key Design Rules
-- NO Ollama dependency — workers run `rpc-server` (from llama.cpp), NOT Ollama
-- NO GPU crates (nvml-wrapper, cuda-sys) — shell out to nvidia-smi/rocm-smi only (gpu.rs)
-- WireGuard AllowedIPs = 10.8.0.0/24 ONLY — never 0.0.0.0/0
-- `rpc-server` binary is built from source on the user's machine (with CUDA) or downloaded from llama.cpp (CPU fallback)
-- Workers bind rpc-server to 0.0.0.0 but it is only reachable via WireGuard
-- Port 50052 must NEVER be exposed to the public internet
-- Graceful shutdown on Ctrl+C: kill rpc-server child → DELETE /workers/{id} → exit
-- Re-register automatically if heartbeat returns 404
+The new architecture uses direct TCP connection to the akai-net hub:
+
+```
+Worker (this binary)
+  ↓ connects to hub:50051 via TCP
+  ↓ sends: HubMessage::Register
+  ← receives: HubMessage::InferenceRequest
+  ↓ processes layers, returns hidden states
+Akai-Net Hub
+  ← OpenAI-compatible API on :8080
+  ← coordinates pipeline across workers
+```
+
+### New Worker Protocol
+
+Workers connect via TCP to port 50051. Protocol is simple JSON messages:
+
+| Message | Direction | Description |
+|---------|-----------|-------------|
+| `HubMessage::Register` | Worker→Hub | Worker announces capabilities |
+| `HubMessage::Heartbeat` | Worker→Hub | Periodic alive check |
+| `HubMessage::InferenceRequest` | Hub→Worker | Tokens to process |
+| `HubMessage::InferenceResponse` | Worker→Hub | Token + hidden states |
+
+### Start Worker Command
+
+```bash
+# New command (v2 protocol):
+akai-agent start-worker \
+  --hub-addr 192.168.1.100:50051 \
+  --worker-id desktop-1 \
+  --model-path /models/model.gguf \
+  --layer-offset 0 \
+  --num-layers 16
+```
+
+Arguments:
+- `--hub-addr`: Hub address (IP:50051)
+- `--worker-id`: Unique worker identifier
+- `--model-path`: Path to GGUF model file
+- `--layer-offset`: Starting layer for this worker
+- `--num-layers`: Number of layers this worker handles
+
+### Layer Assignment
+
+Workers are sorted by capacity (GPU priority):
+- GPU workers: score = vram_gb * 100
+- CPU workers: score = 1
+
+Weakest worker gets first layers, strongest gets last layers.
+
+## Legacy Architecture (v1)
+
+The old architecture used ollama-queue as a registry and WireGuard tunnels:
+
+```
+akai-agent (v1)
+  ↓ init: provision WireGuard, download rpc-server, register
+  ↓ start: heartbeat every 30s, respawn rpc-server if dead
+ollama-queue (Python FastAPI on VPS)
+  ↓ holds live worker registry
+  ↓ GET /workers returns rpc_string e.g. "10.8.0.2:50052"
+```
+
+Commands: `init`, `start`, `install`, `status`, `update-rpc`, `petals-start`
 
 ## Source Files
 | File | Purpose |
@@ -78,81 +121,7 @@ ollama-queue proxy
 | `src/queue_client.rs` | HTTP client for ollama-queue registry API |
 | `src/wireguard/` | Per-OS WireGuard setup (linux/macos/windows) |
 | `src/service/` | systemd / launchd / Windows Service installers |
-
-## ollama-queue API (what this binary calls)
-POST /workers/provision       → get WireGuard peer config
-POST /workers/register        → register worker (id, wg_ip, rpc_port, gpu, vram_gb)
-POST /workers/{id}/heartbeat  → keep-alive every 30s
-DELETE /workers/{id}          → deregister on clean shutdown
-GET  /workers/{id}            → status check (used by akai-agent status)
-All endpoints require: `X-Worker-Key: <api_key>` header.
-Heartbeat returning 404 means the worker fell out of registry → re-register automatically.
-
-## rpc-server Binary Management
-Three-tier approach (in order of priority):
-1. **Source build** (Linux x86_64 with NVIDIA/AMD GPU): Builds llama.cpp locally with CUDA
-   - Detects GPU and NVIDIA driver version via `nvidia-smi`
-   - Selects matching CUDA toolkit version (driver-aware)
-   - Auto-installs build tools (cmake, gcc, git) if missing
-   - Auto-installs CUDA toolkit via apt/dnf/pacman if missing
-   - On atomic/immutable distros (Silverblue, Bluefin): creates a distrobox container named `akai` using Ubuntu 24.04, installs CUDA toolkit + build tools inside, builds rpc-server, copies result back out
-   - Falls back to CPU-only build if CUDA toolkit install fails
-2. **Pre-built CUDA bundle** (fallback, Linux x86_64 only): Downloaded from this repo's GitHub Release
-   `akai-agent-rpc-cuda-linux-x86_64.tar.gz` — contains rpc-server + libggml*.so with CUDA
-   - May not work on all driver versions (CUDA runtime must match driver)
-3. **CPU-only download** (fallback for all platforms): Downloads pre-built from llama.cpp GitHub Releases
-
-- GitHub APIs: `Akinus21/akai-agent` releases (CUDA bundle) + `ggml-org/llama.cpp` releases (CPU-only)
-- Always include header: `User-Agent: akai-agent/<version>`
-- Stored at: ~/.local/share/akai-agent/rpc-server (Linux/macOS)
-             %LOCALAPPDATA%\akai-agent\rpc-server.exe (Windows)
-- CUDA .so files extracted to: ~/.local/share/akai-agent/lib/ (Linux)
-- LD_LIBRARY_PATH set to lib/ dir when spawning rpc-server on Linux
-- Daily update check in start loop; manual: `akai-agent update-rpc`
-- Version stored in config.toml as `rpc_version`
-
-## Driver-to-CUDA Mapping
-| Driver version | CUDA toolkit |
-|---|---|
-| >= 580 | 13.0 |
-| >= 570 | 12.8 |
-| >= 565 | 12.6 |
-| >= 555 | 12.5 |
-| >= 550 | 12.4 |
-| < 550 | CPU only |
-
-## Platform Asset Mapping
-| Platform | GitHub Release Asset |
-|---|---|
-| Linux x86_64 | llama-*-bin-ubuntu-x64.zip |
-| Linux aarch64 | llama-*-bin-ubuntu-arm64.zip |
-| macOS arm64 | llama-*-bin-macos-arm64.zip |
-| macOS x86_64 | llama-*-bin-macos-x64.zip |
-| Windows x86_64 | llama-*-bin-win-cuda-cu12.2.0-x64.zip |
-
-## CI/CD
-- `build.yml`: push to main → build linux x86_64 binary → GitHub Release → update Homebrew tap → webhook
-- `release.yml`: tag push (auto from build.yml) → cross-compile 5 targets → upload all to release → Homebrew formula
-- No CI CUDA bundle — rpc-server is built on the user's machine for driver compatibility
-- Webhook endpoint: `https://webhook.akinus21.com/webhook/akai-agent-build`
-- On failure: full build log sent in `errors` field of webhook payload
-- On success: tag and image info sent
-
-## Required GitHub Secrets
-| Secret | Purpose |
-|---|---|
-| `GH_TOKEN` | PAT with `contents:write` scope for tagging + releases |
-| `TAP_TOKEN` | PAT with write access to `Akinus21/homebrew-tap` |
-| `WEBHOOK_HMAC_SECRET` | Shared secret for HMAC-signing webhook payloads |
-
-## Cross-Compilation Targets
-| Target | Runner |
-|---|---|
-| x86_64-unknown-linux-gnu | ubuntu-latest |
-| aarch64-unknown-linux-gnu | ubuntu-latest + gcc-aarch64-linux-gnu |
-| x86_64-apple-darwin | macos-latest |
-| aarch64-apple-darwin | macos-latest |
-| x86_64-pc-windows-msvc | windows-latest |
+| `src/worker.rs` | New v2 worker protocol implementation |
 
 ## Installation (end users)
 ```bash
@@ -168,16 +137,9 @@ brew install akai-agent
 cargo install --git https://github.com/Akinus21/akai-agent
 ```
 
-## First-Time Setup (end users)
-```bash
-akai-agent init --queue https://ollama.akinus21.com --key YOUR_KEY
-sudo akai-agent install
-akai-agent status
-```
-
 ## Config File
 Linux/macOS: ~/.config/akai-agent/config.toml
 Windows:     %APPDATA%\akai-agent\config.toml
 
-Fields: queue_url, api_key, worker_id, worker_name, wg_ip, wg_peer_id,
-        rpc_port, gpu, vram_gb, rpc_binary, rpc_version
+Fields (v1): queue_url, api_key, worker_id, worker_name, wg_ip, wg_peer_id,
+            rpc_port, gpu, vram_gb, rpc_binary, rpc_version

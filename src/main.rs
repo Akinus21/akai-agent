@@ -9,6 +9,7 @@ mod rpc;
 mod service;
 mod tunnel;
 mod wireguard;
+mod worker;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
