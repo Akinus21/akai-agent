@@ -204,6 +204,7 @@ mod handlers {
             hub_wg_ip: hub_wg_ip.unwrap_or_default(),
             hub_port: hub_port.unwrap_or(8080),
             petals_model: String::new(),
+            hub_addr: String::new(),
         };
 
         println!();

@@ -1,9 +1,8 @@
-use anyhow::Result;
+use anyhow::{Result, Context};
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::process::Command;
 use tokio::time::Duration;
 use tracing::{info, warn, error};
 use reqwest::Client;
@@ -22,26 +21,26 @@ pub struct WorkerInfo {
 pub enum HubMessage {
     #[serde(rename = "register")]
     Register(WorkerInfo),
-    #[serde(rename = "layer_assignment")]
-    LayerAssignment {
-        layer_offset: usize,
-        num_layers: usize,
-    },
     #[serde(rename = "inference_request")]
     InferenceRequest(InferenceRequest),
     #[serde(rename = "inference_response")]
     InferenceResponse(InferenceResponse),
-    #[serde(rename = "heartbeat")]
-    Heartbeat {
-        worker_id: String,
-        load: f32,
-        active: bool,
-    },
+    #[serde(rename = "heartbeat_response")]
+    HeartbeatResponse(HeartbeatResponse),
     #[serde(rename = "error")]
     Error {
         code: String,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatResponse {
+    pub layer_offset: usize,
+    pub num_layers: usize,
+    pub reassign: bool,
+    pub model_name: String,
+    pub model_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,12 +109,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
 
     if let Some(status) = child.try_wait()? {
         if !status.success() {
-            let stderr = child.stderr.take().map(|mut s| {
-                let mut buf = String::new();
-                s.read_to_string(&mut buf).ok();
-                buf
-            }).flatten().unwrap_or_default();
-            error!("llama-server failed to start: {}", stderr);
+            error!("llama-server exited with status: {}", status);
             anyhow::bail!("llama-server exited with status: {}", status);
         }
     }
@@ -249,15 +243,15 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
 
     let mut layer_offset: usize = 0;
     let mut num_layers: usize = 0;
-    let mut rpc_child: Option<tokio::process::Child> = None;
+    let mut rpc_child: Option<std::process::Child> = None;
     let mut assigned = false;
 
     // Handle Ctrl+C gracefully
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         eprintln!("Shutting down worker...");
-        if let Some(mut child) = rpc_child.take() {
-            child.kill().await.ok();
+        if let Some(child) = rpc_child.take() {
+            child.kill().ok();
         }
         std::process::exit(0);
     });
