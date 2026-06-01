@@ -1,6 +1,6 @@
 use anyhow::{Result, Context};
 use serde::{Deserialize, Serialize};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
@@ -21,6 +21,8 @@ pub struct WorkerInfo {
 pub enum HubMessage {
     #[serde(rename = "register")]
     Register(WorkerInfo),
+    #[serde(rename = "heartbeat")]
+    Heartbeat(WorkerHeartbeat),
     #[serde(rename = "inference_request")]
     InferenceRequest(InferenceRequest),
     #[serde(rename = "inference_response")]
@@ -32,6 +34,17 @@ pub enum HubMessage {
         code: String,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerHeartbeat {
+    pub worker_id: String,
+    pub load: f32,
+    pub layer_offset: usize,
+    pub num_layers: usize,
+    pub has_gpu: bool,
+    pub vram_gb: f32,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +157,10 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                     };
 
                     match msg {
+                        HubMessage::HeartbeatResponse(resp) => {
+                            info!("Heartbeat response: layers {} to {}, reassign={}",
+                                resp.layer_offset, resp.num_layers, resp.reassign);
+                        }
                         HubMessage::InferenceRequest(req) => {
                             info!("Received inference request {} ({} tokens)", req.id, req.tokens.len());
 
@@ -200,15 +217,6 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                                     stream.write_all(&data).await?;
                                 }
                             }
-                        }
-                        HubMessage::Heartbeat { worker_id, .. } => {
-                            let resp = HubMessage::Heartbeat {
-                                worker_id: worker_id.clone(),
-                                load: 0.5,
-                                active: true,
-                            };
-                            let data = serde_json::to_vec(&resp)?;
-                            stream.write_all(&data).await?;
                         }
                         HubMessage::Error { code, message } => {
                             error!("Hub error {}: {}", code, message);
@@ -274,7 +282,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                 stream.write_all(&data).await?;
                 info!("Registered with hub, waiting for layer assignment...");
 
-                // Wait for layer assignment or other messages
+                // Wait for heartbeat response or other messages
                 let mut buf = vec![0u8; 65536];
                 while let Ok(n) = stream.read(&mut buf).await {
                     if n == 0 {
@@ -291,21 +299,14 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                     };
 
                     match msg {
-                        HubMessage::LayerAssignment { layer_offset: offset, num_layers: layers } => {
-                            info!("Received layer assignment: layers {} to {}",
-                                offset, offset + layers);
-                            layer_offset = offset;
-                            num_layers = layers;
-                            assigned = true;
-                        }
-                        HubMessage::Heartbeat { .. } => {
-                            let resp = HubMessage::Heartbeat {
-                                worker_id: config.worker_id.clone(),
-                                load: 0.5,
-                                active: true,
-                            };
-                            let data = serde_json::to_vec(&resp)?;
-                            stream.write_all(&data).await?;
+                        HubMessage::HeartbeatResponse(resp) => {
+                            info!("Received heartbeat response: layers {} to {}, model={}",
+                                resp.layer_offset, resp.num_layers, resp.model_name);
+                            if resp.reassign || !assigned {
+                                layer_offset = resp.layer_offset;
+                                num_layers = resp.num_layers;
+                                assigned = true;
+                            }
                         }
                         HubMessage::Error { code, message } => {
                             error!("Hub error {}: {}", code, message);
@@ -324,10 +325,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                 .context("Failed to download rpc-server")?;
                         }
 
-                        // Spawn rpc-server with layer settings
-                        // Note: llama.cpp rpc-server uses --rpc/--offset/--count flags
-                        // Adjust based on actual rpc-server CLI
-                        let mut child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port)?;
+                        let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port)?;
                         rpc_child = Some(child);
                         info!("rpc-server started on port {}", config.rpc_port);
                     }

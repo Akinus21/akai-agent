@@ -420,7 +420,7 @@ mod handlers {
                                     Ok(new_path) => {
                                         rpc_path = new_path;
                                         if let Ok(new_cfg) = crate::config::load_config() {
-                                            cfg = new_cfg;
+                                            *cfg = new_cfg;
                                         }
                                         child = rpc::spawn_rpc_server(&rpc_path, cfg.rpc_port)?;
                                         println!("rpc-server rebuilt and restarted (hub commit: {})", resp.hub_commit);
@@ -667,46 +667,4 @@ mod handlers {
     fn is_not_found(e: &anyhow::Error) -> bool {
         e.to_string().contains("404")
     }
-}
-
-fn resolve_hf_url(model_ref: &str) -> Result<String> {
-    let hf_api = "https://huggingface.co";
-
-    // If it's already a full URL, return as-is
-    if model_ref.starts_with("http://") || model_ref.starts_with("https://") {
-        return Ok(model_ref.to_string());
-    }
-
-    // Parse hf.co/author/model:variant format
-    let re = regex::Regex::new(r"^hf\.co/([^/]+)/([^:]+):(.+)$")?;
-    if let Some(caps) = re.captures(model_ref) {
-        let user = caps.get(1).unwrap().as_str();
-        let repo = caps.get(2).unwrap().as_str();
-        let variant = caps.get(3).unwrap().as_str();
-
-        println!("  Searching for *{variant}*.gguf in {user}/{repo}...");
-
-        let tree_url = format!("{}/api/models/{}/{}/tree/main", hf_api, user, repo);
-        let resp = reqwest::Client::new()
-            .get(&tree_url)
-            .header("User-Agent", concat!("akai-agent/", env!("CARGO_PKG_VERSION")))
-            .send()?;
-
-        if !resp.status().is_success() {
-            anyhow::bail!("Failed to fetch model tree: {}", resp.status());
-        }
-
-        let tree: Vec<serde_json::Value> = resp.json()?;
-        let filename = tree.iter()
-            .filter_map(|entry| entry.get("path").and_then(|p| p.as_str()))
-            .find(|path| {
-                path.contains(variant) && path.ends_with(".gguf")
-            })
-            .context("Could not find matching .gguf file")?;
-
-        let url = format!("{}/{}/{}/resolve/main/{}", hf_api, user, repo, filename);
-        return Ok(url);
-    }
-
-    anyhow::bail!("Invalid model reference format. Expected hf.co/author/model:variant or a direct URL")
 }
