@@ -50,7 +50,8 @@ pub enum Commands {
 
         #[arg(long)]
         quantize: Option<String>,
-    },
+    }
+}
 
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
