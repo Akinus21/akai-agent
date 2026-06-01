@@ -628,19 +628,14 @@ mod handlers {
                 }
             });
 
-        // Get admin key from env
-        let admin_key = std::env::var("ADMIN_KEY")
-            .context("ADMIN_KEY environment variable not set")?;
-
         println!("Changing model on hub: {}", hub_addr);
         println!("  Model: {}", model_ref);
         println!("  Layers: {}", layers);
         println!("  User: {}", cfg.username);
 
-        // Call hub admin API
+        // Call hub admin API (no auth key needed - hub checks username against authorized list)
         let client = reqwest::Client::new();
         let resp = client.post(format!("http://{}/admin/model", hub_addr))
-            .bearer_auth(&admin_key)
             .json(&serde_json::json!({
                 "username": cfg.username,
                 "name": model_ref,
