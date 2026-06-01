@@ -107,12 +107,11 @@ pub fn rpc_commit_hash() -> String {
 
 pub async fn ensure_rpc_server() -> Result<PathBuf> {
     let path = rpc_binary_path();
+    let lib_dir = crate::config::data_dir().join("lib");
 
-    if path.exists() {
+    if path.exists() && lib_dir.exists() && !has_missing_libs(&path) {
         return Ok(path);
     }
-
-    let lib_dir = crate::config::data_dir().join("lib");
 
     #[cfg(target_os = "linux")]
     let needs_build = crate::build::needs_source_build();
@@ -163,12 +162,34 @@ pub async fn ensure_rpc_server() -> Result<PathBuf> {
         }
     }
 
-    if !path.exists() {
+    if !path.exists() || has_missing_libs(&path) {
         std::fs::create_dir_all(path.parent().unwrap())?;
+
+        if crate::build::has_cuda() || crate::build::has_vulkan() {
+            std::fs::remove_dir_all(&lib_dir).ok();
+            std::fs::create_dir_all(&lib_dir).ok();
+            if let Ok(p) = crate::build::build_from_source() {
+                return Ok(p);
+            }
+            eprintln!("  Source build failed — trying pre-built...");
+        }
+
         download_latest().await?;
     }
 
     Ok(path)
+}
+
+fn has_missing_libs(binary: &Path) -> bool {
+    use std::process::Command;
+    if let Ok(output) = Command::new("ldd").arg(binary).output() {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if line.trim().contains("not found") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 async fn download_cuda_bundle() -> Result<()> {
@@ -388,13 +409,23 @@ pub async fn download_latest() -> Result<()> {
 }
 
 pub fn spawn_rpc_server(binary: &Path, port: u16) -> Result<std::process::Child> {
-    let mut cmd = std::process::Command::new(binary);
+    let binary = binary.to_path_buf();
+    let lib_dir = crate::config::data_dir().join("lib");
+
+    if has_missing_libs(&binary) {
+        eprintln!("  rpc-server missing libraries — re-acquiring...");
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async {
+            ensure_rpc_server().await
+        })?;
+    }
+
+    let mut cmd = std::process::Command::new(&binary);
     cmd.arg("--host").arg("0.0.0.0")
        .arg("--port").arg(port.to_string());
 
     #[cfg(target_os = "linux")]
     {
-        let lib_dir = crate::config::data_dir().join("lib");
         let mut ld_path = lib_dir.to_string_lossy().to_string();
         for dir in &[
             "/home/linuxbrew/.linuxbrew/lib",
@@ -417,6 +448,7 @@ pub fn spawn_rpc_server(binary: &Path, port: u16) -> Result<std::process::Child>
             ld_path.push_str(&format!(":{}", existing));
         }
         cmd.env("LD_LIBRARY_PATH", ld_path);
+        eprintln!("  LD_LIBRARY_PATH={}", ld_path);
     }
 
     Ok(cmd.spawn()?)
