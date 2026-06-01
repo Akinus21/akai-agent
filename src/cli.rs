@@ -74,7 +74,6 @@ mod handlers {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::process::Command;
     use crate::{auth, config, gpu, petals, queue_client::QueueClient, rpc, wireguard};
 
     pub fn clean() -> Result<()> {
@@ -185,6 +184,7 @@ mod handlers {
             tunnel_port: 0,
             hub_wg_ip: hub_wg_ip.unwrap_or_default(),
             hub_port: hub_port.unwrap_or(8080),
+            petals_model: String::new(),
         };
 
         println!();

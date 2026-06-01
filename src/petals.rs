@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering, Arc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
