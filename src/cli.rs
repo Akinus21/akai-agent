@@ -70,11 +70,11 @@ pub enum Commands {
     },
 
     Chmod {
-        #[arg(help = "Model reference (e.g., hf.co/author/model:Q6_K) or URL to GGUF")]
+        #[arg(help = "Model reference (e.g., hf.co/author/model:Q5_K_S) or direct GGUF URL")]
         model: String,
 
-        #[arg(long, help = "Number of layers in the model")]
-        layers: Option<usize>,
+        #[arg(long, help = "Total number of layers in the model (e.g., 32 for Llama-7B)")]
+        layers: usize,
     },
 }
 
@@ -613,51 +613,27 @@ mod handlers {
         petals::run_petals_worker(model.to_string(), port, quantize).await
     }
 
-    pub async fn chmod(model_ref: &str, layers: Option<usize>) -> Result<()> {
+    pub async fn chmod(model_ref: &str, layers: usize) -> Result<()> {
         let cfg = config::load_config()
             .context("Config not found. Run `akai-agent init` first.")?;
 
         // Get hub address from config or env
         let hub_addr = std::env::var("HUB_ADDR")
-            .unwrap_or_else(|_| cfg.get_hub_addr());
+            .unwrap_or_else(|_| {
+                // Extract host from queue_url for hub address
+                if let Ok(url) = reqwest::Url::parse(&cfg.queue_url) {
+                    format!("{}:8080", url.host_str().unwrap_or("localhost"))
+                } else {
+                    cfg.get_hub_addr()
+                }
+            });
 
         // Get admin key from env
         let admin_key = std::env::var("ADMIN_KEY")
             .context("ADMIN_KEY environment variable not set")?;
 
         println!("Changing model on hub: {}", hub_addr);
-
-        // Resolve HuggingFace reference to URL
-        let url = resolve_hf_url(model_ref)?;
-        println!("  Model URL: {}", url);
-
-        // Get layers from hub if not provided
-        let layers = if let Some(l) = layers {
-            l
-        } else {
-            // Query hub for current model layers
-            match reqwest::Client::new()
-                .get(format!("http://{}/health", hub_addr))
-                .send().await
-            {
-                Ok(resp) => {
-                    if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        json["num_layers"].as_u64().unwrap_or(32) as usize
-                    } else {
-                        32
-                    }
-                }
-                Err(_) => 32,
-            }
-        };
-
-        let model_name = model_ref.split(':').last()
-            .unwrap_or(model_ref)
-            .split('/')
-            .last()
-            .unwrap_or(model_ref);
-
-        println!("  Model: {}", model_name);
+        println!("  Model: {}", model_ref);
         println!("  Layers: {}", layers);
         println!("  User: {}", cfg.username);
 
@@ -667,9 +643,9 @@ mod handlers {
             .bearer_auth(&admin_key)
             .json(&serde_json::json!({
                 "username": cfg.username,
-                "name": model_name,
+                "name": model_ref,
                 "layers": layers,
-                "url": url,
+                "url": model_ref,
             }))
             .send().await
             .context("Failed to call hub admin API")?;
