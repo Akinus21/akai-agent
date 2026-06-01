@@ -1,11 +1,12 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::net::TcpStream;
+use std::process::Stdio;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, RwLock};
-use tokio::time::{interval, Duration};
+use tokio::net::TcpStream;
+use tokio::process::Command;
+use tokio::time::Duration;
 use tracing::{info, warn, error};
+use reqwest::Client;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerInfo {
@@ -64,6 +65,8 @@ pub struct WorkerConfig {
     pub layer_offset: usize,
     pub num_layers: usize,
     pub model_path: String,
+    pub llama_server_path: Option<String>,
+    pub n_gpu_layers: i32,
 }
 
 pub async fn run_worker(config: WorkerConfig) -> Result<()> {
@@ -72,6 +75,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
     info!("  Hub: {}", config.hub_addr);
     info!("  GPU: {}, VRAM: {:.1} GB", config.has_gpu, config.vram_gb);
     info!("  Layers: {} to {} ({})", config.layer_offset, config.layer_offset + config.num_layers, config.num_layers);
+    info!("  Model: {}", config.model_path);
 
     let worker_info = WorkerInfo {
         id: config.worker_id.clone(),
@@ -80,6 +84,40 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
         vram_gb: config.vram_gb,
         has_gpu: config.has_gpu,
     };
+
+    let llama_port = 8080u16;
+    let n_gpu_layers = if config.has_gpu { config.n_gpu_layers } else { 0 };
+
+    info!("Starting llama-server on port {}...", llama_port);
+    let mut child = Command::new(config.llama_server_path.as_deref().unwrap_or("llama-server"))
+        .args(&[
+            "-m", &config.model_path,
+            "-c", "4096",
+            "-ngl", &n_gpu_layers.to_string(),
+            "--port", &llama_port.to_string(),
+            "--host", "127.0.0.1",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    if let Some(status) = child.try_wait()? {
+        if !status.success() {
+            let stderr = child.stderr.take().map(|mut s| {
+                let mut buf = String::new();
+                s.read_to_string(&mut buf).ok();
+                buf
+            }).flatten().unwrap_or_default();
+            error!("llama-server failed to start: {}", stderr);
+            anyhow::bail!("llama-server exited with status: {}", status);
+        }
+    }
+
+    info!("llama-server started on 127.0.0.1:{}", llama_port);
+    let client = Client::new();
+    let llama_url = format!("http://127.0.0.1:{}/v1/chat/completions", llama_port);
 
     loop {
         match TcpStream::connect(&config.hub_addr).await {
@@ -109,15 +147,60 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                     match msg {
                         HubMessage::InferenceRequest(req) => {
                             info!("Received inference request {} ({} tokens)", req.id, req.tokens.len());
-                            let resp = InferenceResponse {
-                                id: req.id,
-                                token: Some(0),
-                                hidden_states: None,
-                                is_done: true,
-                            };
-                            let msg = HubMessage::InferenceResponse(resp);
-                            let data = serde_json::to_vec(&msg)?;
-                            stream.write_all(&data).await?;
+
+                            let prompt = format!("Tokens: {:?}", req.tokens);
+                            let body = serde_json::json!({
+                                "model": "local-model",
+                                "messages": [{"role": "user", "content": prompt}],
+                                "max_tokens": req.max_new_tokens,
+                                "temperature": req.temperature,
+                                "stream": false
+                            });
+
+                            match client.post(&llama_url).json(&body).send().await {
+                                Ok(resp) => {
+                                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                        let content = json["choices"][0]["message"]["content"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .to_string();
+                                        info!("Generated: {}", content);
+
+                                        let resp = InferenceResponse {
+                                            id: req.id,
+                                            token: None,
+                                            hidden_states: None,
+                                            is_done: true,
+                                        };
+                                        let msg = HubMessage::InferenceResponse(resp);
+                                        let data = serde_json::to_vec(&msg)?;
+                                        stream.write_all(&data).await?;
+                                    } else {
+                                        error!("Failed to parse llama-server response");
+                                        let resp = InferenceResponse {
+                                            id: req.id,
+                                            token: Some(0),
+                                            hidden_states: None,
+                                            is_done: true,
+                                        };
+                                        let msg = HubMessage::InferenceResponse(resp);
+                                        let data = serde_json::to_vec(&msg)?;
+                                        stream.write_all(&data).await?;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("llama-server request failed: {}", e);
+                                    let resp = InferenceResponse {
+                                        id: req.id,
+                                        token: Some(0),
+                                        hidden_states: None,
+                                        is_done: true,
+                                    };
+                                    let msg = HubMessage::InferenceResponse(resp);
+                                    let data = serde_json::to_vec(&msg)?;
+                                    stream.write_all(&data).await?;
+                                }
+                            }
                         }
                         HubMessage::Heartbeat { worker_id, .. } => {
                             let resp = HubMessage::Heartbeat {

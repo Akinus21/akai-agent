@@ -458,6 +458,13 @@ mod handlers {
     ) -> Result<()> {
         let gpu_info = gpu::detect_gpu();
 
+        println!("Ensuring llama-server is available...");
+        let llama_server = rpc::ensure_llama_server().await
+            .context("Failed to download llama-server")?;
+        println!("llama-server: {}", llama_server.display());
+
+        let n_gpu_layers = if gpu_info.has_gpu { 99 } else { 0 };
+
         let cfg = worker::WorkerConfig {
             hub_addr: hub_addr.to_string(),
             worker_id: worker_id.to_string(),
@@ -466,6 +473,8 @@ mod handlers {
             layer_offset,
             num_layers,
             model_path: model_path.to_string(),
+            llama_server_path: Some(llama_server.to_string_lossy().to_string()),
+            n_gpu_layers,
         };
 
         worker::run_worker(cfg).await

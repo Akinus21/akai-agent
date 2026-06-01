@@ -10,8 +10,16 @@ pub fn binary_name() -> &'static str {
     if cfg!(windows) { "rpc-server.exe" } else { "rpc-server" }
 }
 
+pub fn llama_server_name() -> &'static str {
+    if cfg!(windows) { "llama-server.exe" } else { "llama-server" }
+}
+
 pub fn rpc_binary_path() -> PathBuf {
     crate::config::data_dir().join(binary_name())
+}
+
+pub fn llama_server_path() -> PathBuf {
+    crate::config::data_dir().join(llama_server_name())
 }
 
 fn rpc_cuda_asset_name() -> Option<String> {
@@ -440,6 +448,122 @@ pub fn spawn_rpc_server(binary: &Path, port: u16) -> Result<std::process::Child>
             ld_path.push_str(&format!(":{}", existing));
         }
         eprintln!("  LD_LIBRARY_PATH={}", ld_path);
+        cmd.env("LD_LIBRARY_PATH", ld_path);
+    }
+
+    Ok(cmd.spawn()?)
+}
+
+pub async fn ensure_llama_server() -> Result<PathBuf> {
+    let path = llama_server_path();
+    if path.exists() {
+        return Ok(path);
+    }
+
+    println!("Downloading llama-server...");
+    let release = fetch_latest_release().await?;
+    let tag = release["tag_name"].as_str().unwrap_or("latest");
+    let assets = release["assets"].as_array()
+        .ok_or_else(|| anyhow!("no assets in release"))?;
+
+    let pattern = asset_pattern();
+    let asset = assets.iter()
+        .find(|a| {
+            let name = a["name"].as_str().unwrap_or("");
+            glob_match(pattern, name)
+        })
+        .ok_or_else(|| anyhow!("llama.cpp release asset not found for pattern: {}", pattern))?;
+
+    let url = asset["browser_download_url"].as_str()
+        .ok_or_else(|| anyhow!("missing download URL"))?;
+
+    let client = reqwest::Client::new();
+    let bytes = client.get(url)
+        .header("User-Agent", USER_AGENT)
+        .send().await?
+        .bytes().await?;
+
+    let dest = &path;
+    std::fs::create_dir_all(dest.parent().unwrap())?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut archive = zip::ZipArchive::new(bytes.as_ref())?;
+        let mut found = false;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            let name = file.name().to_string();
+            if name.ends_with(llama_server_name()) {
+                let mut out = std::fs::File::create(dest)?;
+                std::io::copy(&mut file, &mut out)?;
+                found = true;
+            }
+        }
+        if !found {
+            bail!("llama-server binary not found in downloaded zip");
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let decoder = GzDecoder::new(bytes.as_ref());
+        let mut archive = tar::Archive::new(decoder);
+        let mut found = false;
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let name = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            if name.ends_with("llama-server") || name.ends_with("llama-cli") {
+                let mut out = std::fs::File::create(dest)?;
+                std::io::copy(&mut entry, &mut out)?;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            bail!("llama-server binary not found in downloaded tarball");
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    println!("llama-server installed ({})", tag);
+    Ok(dest.clone())
+}
+
+pub fn spawn_llama_server(binary: &Path, model_path: &str, n_gpu_layers: i32, port: u16) -> Result<std::process::Child> {
+    let mut cmd = std::process::Command::new(binary);
+    cmd.arg("-m").arg(model_path)
+       .arg("-c").arg("4096")
+       .arg("-ngl").arg(n_gpu_layers.to_string())
+       .arg("--port").arg(port.to_string())
+       .arg("--host").arg("127.0.0.1");
+
+    #[cfg(target_os = "linux")]
+    {
+        let lib_dir = crate::config::data_dir().join("lib");
+        let mut ld_path = lib_dir.to_string_lossy().to_string();
+        for dir in &[
+            "/home/linuxbrew/.linuxbrew/lib",
+            "/usr/local/cuda/lib64",
+            "/usr/local/cuda/lib",
+            "/usr/lib/x86_64-linux-gnu",
+            "/usr/lib64",
+            "/usr/lib",
+            "/lib/x86_64-linux-gnu",
+            "/lib64",
+            "/usr/local/lib",
+        ] {
+            if std::path::Path::new(dir).exists() {
+                ld_path.push_str(&format!(":{}", dir));
+            }
+        }
+        if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+            ld_path.push_str(&format!(":{}", existing));
+        }
         cmd.env("LD_LIBRARY_PATH", ld_path);
     }
 
