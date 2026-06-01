@@ -413,11 +413,9 @@ pub fn spawn_rpc_server(binary: &Path, port: u16) -> Result<std::process::Child>
     let lib_dir = crate::config::data_dir().join("lib");
 
     if has_missing_libs(&binary) {
-        eprintln!("  rpc-server missing libraries — re-acquiring...");
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(async {
-            ensure_rpc_server().await
-        })?;
+        bail!(
+            "rpc-server is missing required libraries. Run 'akai-agent init' to rebuild it."
+        );
     }
 
     let mut cmd = std::process::Command::new(&binary);
