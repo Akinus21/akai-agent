@@ -243,6 +243,8 @@ pub struct HubWorkerConfig {
 }
 
 pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
+    use std::sync::Mutex;
+
     info!("Akai-Net Hub Worker starting...");
     info!("  Hub: {}", config.hub_addr);
     info!("  Worker ID: {}", config.worker_id);
@@ -251,14 +253,15 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
 
     let mut layer_offset: usize = 0;
     let mut num_layers: usize = 0;
-    let mut rpc_child: Option<std::process::Child> = None;
+    let rpc_child: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
     let mut assigned = false;
+    let rpc_child_clone = rpc_child.clone();
 
     // Handle Ctrl+C gracefully
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         eprintln!("Shutting down worker...");
-        if let Some(child) = rpc_child.take() {
+        if let Some(child) = rpc_child_clone.lock().unwrap().take() {
             child.kill().ok();
         }
         std::process::exit(0);
@@ -315,7 +318,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                     }
 
                     // If we got our assignment, spawn rpc-server
-                    if assigned && rpc_child.is_none() {
+                    if assigned && rpc_child.lock().unwrap().is_none() {
                         info!("Spawning rpc-server for layers {} to {}...", layer_offset, layer_offset + num_layers);
 
                         let rpc_path = crate::rpc::rpc_binary_path();
@@ -326,7 +329,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                         }
 
                         let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port)?;
-                        rpc_child = Some(child);
+                        *rpc_child.lock().unwrap() = Some(child);
                         info!("rpc-server started on port {}", config.rpc_port);
                     }
                 }

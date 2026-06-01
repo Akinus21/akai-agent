@@ -260,11 +260,11 @@ mod handlers {
             }).await
         } else {
             // Legacy queue-based start
-            start_queue_worker(&cfg).await
+            start_queue_worker(&mut cfg).await
         }
     }
 
-    async fn start_queue_worker(cfg: &config::Config) -> Result<()> {
+    async fn start_queue_worker(cfg: &mut config::Config) -> Result<()> {
         println!("Starting akai-agent (queue mode)");
         println!("  Worker:    {}", cfg.worker_id);
         println!("  Queue:     {}", cfg.queue_url);
@@ -301,7 +301,7 @@ mod handlers {
             });
         }
 
-        let rpc_path = rpc::ensure_rpc_server().await
+        let mut rpc_path = rpc::ensure_rpc_server().await
             .context("rpc-server binary not found")?;
 
         let mut child = rpc::spawn_rpc_server(&rpc_path, cfg.rpc_port)
