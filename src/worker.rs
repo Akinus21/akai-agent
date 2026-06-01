@@ -22,6 +22,11 @@ pub struct WorkerInfo {
 pub enum HubMessage {
     #[serde(rename = "register")]
     Register(WorkerInfo),
+    #[serde(rename = "layer_assignment")]
+    LayerAssignment {
+        layer_offset: usize,
+        num_layers: usize,
+    },
     #[serde(rename = "inference_request")]
     InferenceRequest(InferenceRequest),
     #[serde(rename = "inference_response")]
@@ -215,6 +220,122 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                             error!("Hub error {}: {}", code, message);
                         }
                         _ => {}
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to connect to hub: {}", e);
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+pub struct HubWorkerConfig {
+    pub hub_addr: String,
+    pub worker_id: String,
+    pub has_gpu: bool,
+    pub vram_gb: f32,
+    pub rpc_port: u16,
+}
+
+pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
+    info!("Akai-Net Hub Worker starting...");
+    info!("  Hub: {}", config.hub_addr);
+    info!("  Worker ID: {}", config.worker_id);
+    info!("  GPU: {}, VRAM: {:.1} GB", config.has_gpu, config.vram_gb);
+    info!("  RPC port: {}", config.rpc_port);
+
+    let mut layer_offset: usize = 0;
+    let mut num_layers: usize = 0;
+    let mut rpc_child: Option<tokio::process::Child> = None;
+    let mut assigned = false;
+
+    // Handle Ctrl+C gracefully
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        eprintln!("Shutting down worker...");
+        if let Some(mut child) = rpc_child.take() {
+            child.kill().await.ok();
+        }
+        std::process::exit(0);
+    });
+
+    loop {
+        match tokio::net::TcpStream::connect(&config.hub_addr).await {
+            Ok(mut stream) => {
+                info!("Connected to hub");
+
+                // Register with hub
+                let worker_info = WorkerInfo {
+                    id: config.worker_id.clone(),
+                    layer_offset: 0,
+                    num_layers: 0,
+                    vram_gb: config.vram_gb,
+                    has_gpu: config.has_gpu,
+                };
+                let register = HubMessage::Register(worker_info);
+                let data = serde_json::to_vec(&register)?;
+                stream.write_all(&data).await?;
+                info!("Registered with hub, waiting for layer assignment...");
+
+                // Wait for layer assignment or other messages
+                let mut buf = vec![0u8; 65536];
+                while let Ok(n) = stream.read(&mut buf).await {
+                    if n == 0 {
+                        warn!("Connection closed by hub");
+                        break;
+                    }
+
+                    let msg: HubMessage = match serde_json::from_slice(&buf[..n]) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            error!("Failed to parse message: {}", e);
+                            continue;
+                        }
+                    };
+
+                    match msg {
+                        HubMessage::LayerAssignment { layer_offset: offset, num_layers: layers } => {
+                            info!("Received layer assignment: layers {} to {}",
+                                offset, offset + layers);
+                            layer_offset = offset;
+                            num_layers = layers;
+                            assigned = true;
+                        }
+                        HubMessage::Heartbeat { .. } => {
+                            let resp = HubMessage::Heartbeat {
+                                worker_id: config.worker_id.clone(),
+                                load: 0.5,
+                                active: true,
+                            };
+                            let data = serde_json::to_vec(&resp)?;
+                            stream.write_all(&data).await?;
+                        }
+                        HubMessage::Error { code, message } => {
+                            error!("Hub error {}: {}", code, message);
+                        }
+                        _ => {}
+                    }
+
+                    // If we got our assignment, spawn rpc-server
+                    if assigned && rpc_child.is_none() {
+                        info!("Spawning rpc-server for layers {} to {}...", layer_offset, layer_offset + num_layers);
+
+                        let rpc_path = crate::rpc::rpc_binary_path();
+                        if !rpc_path.exists() {
+                            info!("Downloading rpc-server...");
+                            crate::rpc::ensure_rpc_server().await
+                                .context("Failed to download rpc-server")?;
+                        }
+
+                        // Spawn rpc-server with layer settings
+                        // Note: llama.cpp rpc-server uses --rpc/--offset/--count flags
+                        // Adjust based on actual rpc-server CLI
+                        let mut child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port)?;
+                        rpc_child = Some(child);
+                        info!("rpc-server started on port {}", config.rpc_port);
                     }
                 }
             }

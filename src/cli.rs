@@ -224,19 +224,42 @@ mod handlers {
     }
 
     pub async fn start() -> Result<()> {
-        let mut cfg = config::load_config()
+        let cfg = config::load_config()
             .context("Config not found. Run `akai-agent init` first.")?;
 
-        println!("Starting akai-agent");
+        // Check if HUB_ADDR is set for new architecture
+        if let Ok(hub_addr) = std::env::var("HUB_ADDR") {
+            println!("Starting akai-agent in hub mode");
+            println!("  Hub:       {}", hub_addr);
+            println!("  Worker:    {}", cfg.worker_id);
+
+            let gpu_info = gpu::detect_gpu();
+            if gpu_info.has_gpu {
+                println!("  GPU:       {} ({:.1} GB)", gpu_info.name, gpu_info.vram_gb);
+            } else {
+                println!("  GPU:       CPU only");
+            }
+
+            worker::run_hub_worker(worker::HubWorkerConfig {
+                hub_addr,
+                worker_id: cfg.worker_id.clone(),
+                has_gpu: gpu_info.has_gpu,
+                vram_gb: gpu_info.vram_gb as f32,
+                rpc_port: cfg.rpc_port,
+            }).await
+        } else {
+            // Legacy queue-based start
+            start_queue_worker(&cfg).await
+        }
+    }
+
+    async fn start_queue_worker(cfg: &config::Config) -> Result<()> {
+        println!("Starting akai-agent (queue mode)");
         println!("  Worker:    {}", cfg.worker_id);
         println!("  Queue:     {}", cfg.queue_url);
         println!("  RPC port:  {}", cfg.rpc_port);
-        if !cfg.hub_wg_ip.is_empty() {
-            println!("  Hub WG:    {}:{}", cfg.hub_wg_ip, cfg.hub_port);
-        }
 
         let use_tunnel = !cfg.tunnel_host.is_empty();
-
         let tunnel_connected: Arc<AtomicBool> = Arc::new(AtomicBool::new(!use_tunnel));
 
         if use_tunnel {
@@ -254,7 +277,7 @@ mod handlers {
             }
         }
 
-        let client = QueueClient::from_config(&cfg);
+        let client = QueueClient::from_config(cfg);
 
         {
             let client  = client.clone();
@@ -267,7 +290,7 @@ mod handlers {
             });
         }
 
-        let mut rpc_path = rpc::ensure_rpc_server().await
+        let rpc_path = rpc::ensure_rpc_server().await
             .context("rpc-server binary not found")?;
 
         let mut child = rpc::spawn_rpc_server(&rpc_path, cfg.rpc_port)

@@ -31,6 +31,23 @@ pub struct Config {
     pub hub_port: u16,
     #[serde(default)]
     pub petals_model: String,
+    #[serde(default)]
+    pub hub_addr: String,
+}
+
+impl Config {
+    pub fn get_hub_addr(&self) -> String {
+        std::env::var("HUB_ADDR")
+            .unwrap_or_else(|_| {
+                if !self.hub_addr.is_empty() {
+                    self.hub_addr.clone()
+                } else if !self.hub_wg_ip.is_empty() {
+                    format!("{}:{}", self.hub_wg_ip, self.hub_port)
+                } else {
+                    "127.0.0.1:50051".to_string()
+                }
+            })
+    }
 }
 
 pub fn config_path() -> PathBuf {
