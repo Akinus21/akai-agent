@@ -67,7 +67,15 @@ pub enum Commands {
 
         #[arg(long)]
         quantize: Option<String>,
-    }
+    },
+
+    Chmod {
+        #[arg(help = "Model reference (e.g., hf.co/author/model:Q6_K) or URL to GGUF")]
+        model: String,
+
+        #[arg(long, help = "Number of layers in the model")]
+        layers: Option<usize>,
+    },
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -84,6 +92,8 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::UpdateRpc   => handlers::update_rpc().await,
         Commands::PetalsStart { model, port, quantize } =>
             handlers::start_petals(&model, port, quantize).await,
+        Commands::Chmod { model, layers } =>
+            handlers::chmod(&model, layers).await,
     }
 }
 
@@ -603,7 +613,124 @@ mod handlers {
         petals::run_petals_worker(model.to_string(), port, quantize).await
     }
 
+    pub async fn chmod(model_ref: &str, layers: Option<usize>) -> Result<()> {
+        let cfg = config::load_config()
+            .context("Config not found. Run `akai-agent init` first.")?;
+
+        // Get hub address from config or env
+        let hub_addr = std::env::var("HUB_ADDR")
+            .unwrap_or_else(|_| cfg.get_hub_addr());
+
+        // Get admin key from env
+        let admin_key = std::env::var("ADMIN_KEY")
+            .context("ADMIN_KEY environment variable not set")?;
+
+        println!("Changing model on hub: {}", hub_addr);
+
+        // Resolve HuggingFace reference to URL
+        let url = resolve_hf_url(model_ref)?;
+        println!("  Model URL: {}", url);
+
+        // Get layers from hub if not provided
+        let layers = if let Some(l) = layers {
+            l
+        } else {
+            // Query hub for current model layers
+            match reqwest::Client::new()
+                .get(format!("http://{}/health", hub_addr))
+                .send().await
+            {
+                Ok(resp) => {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        json["num_layers"].as_u64().unwrap_or(32) as usize
+                    } else {
+                        32
+                    }
+                }
+                Err(_) => 32,
+            }
+        };
+
+        let model_name = model_ref.split(':').last()
+            .unwrap_or(model_ref)
+            .split('/')
+            .last()
+            .unwrap_or(model_ref);
+
+        println!("  Model: {}", model_name);
+        println!("  Layers: {}", layers);
+        println!("  User: {}", cfg.username);
+
+        // Call hub admin API
+        let client = reqwest::Client::new();
+        let resp = client.post(format!("http://{}/admin/model", hub_addr))
+            .bearer_auth(&admin_key)
+            .json(&serde_json::json!({
+                "username": cfg.username,
+                "name": model_name,
+                "layers": layers,
+                "url": url,
+            }))
+            .send().await
+            .context("Failed to call hub admin API")?;
+
+        if resp.status().is_success() {
+            println!("✓ Model changed successfully");
+            let json: serde_json::Value = resp.json().await?;
+            println!("  New model: {}", json["model"]);
+            println!("  Layers: {}", json["layers"]);
+        } else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Hub returned error {}: {}", status, body);
+        }
+
+        Ok(())
+    }
+
     fn is_not_found(e: &anyhow::Error) -> bool {
         e.to_string().contains("404")
     }
+}
+
+fn resolve_hf_url(model_ref: &str) -> Result<String> {
+    let hf_api = "https://huggingface.co";
+
+    // If it's already a full URL, return as-is
+    if model_ref.starts_with("http://") || model_ref.starts_with("https://") {
+        return Ok(model_ref.to_string());
+    }
+
+    // Parse hf.co/author/model:variant format
+    let re = regex::Regex::new(r"^hf\.co/([^/]+)/([^:]+):(.+)$")?;
+    if let Some(caps) = re.captures(model_ref) {
+        let user = caps.get(1).unwrap().as_str();
+        let repo = caps.get(2).unwrap().as_str();
+        let variant = caps.get(3).unwrap().as_str();
+
+        println!("  Searching for *{variant}*.gguf in {user}/{repo}...");
+
+        let tree_url = format!("{}/api/models/{}/{}/tree/main", hf_api, user, repo);
+        let resp = reqwest::Client::new()
+            .get(&tree_url)
+            .header("User-Agent", concat!("akai-agent/", env!("CARGO_PKG_VERSION")))
+            .send()?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("Failed to fetch model tree: {}", resp.status());
+        }
+
+        let tree: Vec<serde_json::Value> = resp.json()?;
+        let filename = tree.iter()
+            .filter_map(|entry| entry.get("path").and_then(|p| p.as_str()))
+            .find(|path| {
+                path.contains(variant) && path.ends_with(".gguf")
+            })
+            .context("Could not find matching .gguf file")?;
+
+        let url = format!("{}/{}/{}/resolve/main/{}", hf_api, user, repo, filename);
+        return Ok(url);
+    }
+
+    anyhow::bail!("Invalid model reference format. Expected hf.co/author/model:variant or a direct URL")
 }
