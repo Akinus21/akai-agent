@@ -235,7 +235,7 @@ mod handlers {
     }
 
     pub async fn start() -> Result<()> {
-        let cfg = config::load_config()
+        let mut cfg = config::load_config()
             .context("Config not found. Run `akai-agent init` first.")?;
 
         // Check if HUB_ADDR is set for new architecture
