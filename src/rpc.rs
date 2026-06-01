@@ -447,8 +447,8 @@ pub fn spawn_rpc_server(binary: &Path, port: u16) -> Result<std::process::Child>
         if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
             ld_path.push_str(&format!(":{}", existing));
         }
-        cmd.env("LD_LIBRARY_PATH", ld_path);
         eprintln!("  LD_LIBRARY_PATH={}", ld_path);
+        cmd.env("LD_LIBRARY_PATH", ld_path);
     }
 
     Ok(cmd.spawn()?)
