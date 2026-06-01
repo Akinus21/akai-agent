@@ -262,7 +262,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         eprintln!("Shutting down worker...");
-        if let Some(child) = rpc_child_clone.lock().unwrap().take() {
+        if let Some(mut child) = rpc_child_clone.lock().unwrap().take() {
             child.kill().ok();
         }
         std::process::exit(0);
