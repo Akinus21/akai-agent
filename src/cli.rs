@@ -622,7 +622,7 @@ mod handlers {
             .unwrap_or_else(|_| {
                 // Extract host from queue_url for hub address
                 if let Ok(url) = reqwest::Url::parse(&cfg.queue_url) {
-                    format!("{}:8080", url.host_str().unwrap_or("localhost"))
+                    format!("{}", url.host_str().unwrap_or("localhost"))
                 } else {
                     cfg.get_hub_addr()
                 }
