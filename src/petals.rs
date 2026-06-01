@@ -148,6 +148,28 @@ pub async fn run_petals_worker(
     server.run().await
 }
 
+pub fn spawn_petals(model: &str, port: u16) -> Result<tokio::process::Child> {
+    let mut cmd = Command::new("python3");
+    cmd.args(&[
+        "-m", "petals.cli.run_server",
+        model,
+        "--port", &port.to_string(),
+    ]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let child = cmd.spawn().context("Failed to spawn petals server")?;
+    Ok(child)
+}
+
+pub fn petals_args(model: &str, port: u16) -> Vec<String> {
+    vec![
+        "-m".to_string(), "petals.cli.run_server".to_string(),
+        model.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+    ]
+}
+
 pub async fn check_petals_health(port: u16) -> Result<bool> {
     let url = format!("http://127.0.0.1:{}/health", port);
     let client = reqwest::Client::builder()

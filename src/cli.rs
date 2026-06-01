@@ -69,9 +69,11 @@ pub async fn run() -> anyhow::Result<()> {
 
 mod handlers {
     use anyhow::{Context, Result};
+    use std::process::Stdio;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio::process::Command;
     use crate::{auth, config, gpu, petals, queue_client::QueueClient, rpc, wireguard};
 
     pub fn clean() -> Result<()> {
@@ -284,6 +286,9 @@ mod handlers {
         tunnel_tick.tick().await;
         update_tick.tick().await;
 
+        // Petals child process (if model is set via heartbeat)
+        let mut petals_child: Option<tokio::process::Child> = None;
+
         loop {
             tokio::select! {
                 _ = heartbeat_tick.tick() => {
@@ -318,6 +323,36 @@ mod handlers {
                         Ok(resp) => {
                             let tunnel_ok = if use_tunnel { tunnel_connected.load(Ordering::Relaxed) } else { true };
                             tracing::info!("Heartbeat OK (tunnel={}, hub={})", tunnel_ok, hub_reachable);
+
+                            // Check if model changed — restart petals if needed
+                            if !resp.model.is_empty() {
+                                if resp.model != cfg.petals_model || petals_child.as_mut().is_none() {
+                                    if !resp.model.is_empty() {
+                                        eprintln!("Model set/changed: {}. Starting petals...", resp.model);
+                                        // Kill existing petals process
+                                        if let Some(mut child) = petals_child.take() {
+                                            child.kill().await.ok();
+                                            child.wait().await.ok();
+                                        }
+                                        // Start new petals process
+                                        let args = petals::petals_args(&resp.model, 50052);
+                                        let mut cmd = tokio::process::Command::new("python3");
+                                        cmd.args(&args);
+                                        cmd.stdout(Stdio::piped());
+                                        cmd.stderr(Stdio::piped());
+                                        match cmd.spawn() {
+                                            Ok(child) => {
+                                                petals_child = Some(child);
+                                                cfg.petals_model = resp.model.clone();
+                                                config::save_config(&cfg).ok();
+                                                println!("Petals server started for model: {}", resp.model);
+                                            }
+                                            Err(e) => eprintln!("Failed to start petals: {e}"),
+                                        }
+                                    }
+                                }
+                            }
+
                             let my_commit = rpc::rpc_commit_hash();
                             if !resp.hub_commit.is_empty() && !my_commit.is_empty() && my_commit != resp.hub_commit {
                                 eprintln!("Hub commit mismatch: hub={}, local={}. Rebuilding rpc-server...", resp.hub_commit, my_commit);

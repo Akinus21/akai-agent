@@ -29,6 +29,8 @@ pub struct Config {
     pub hub_wg_ip: String,
     #[serde(default)]
     pub hub_port: u16,
+    #[serde(default)]
+    pub petals_model: String,
 }
 
 pub fn config_path() -> PathBuf {

@@ -55,6 +55,8 @@ struct HeartbeatRequest {
 pub struct HeartbeatResponse {
     #[serde(default)]
     pub hub_commit: String,
+    #[serde(default)]
+    pub model: String,
 }
 
 #[derive(Deserialize, Debug)]
