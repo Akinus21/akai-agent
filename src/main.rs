@@ -3,6 +3,7 @@ mod build;
 mod cli;
 mod config;
 mod gpu;
+mod petals;
 mod queue_client;
 mod rpc;
 mod service;

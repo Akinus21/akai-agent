@@ -40,7 +40,17 @@ pub enum Commands {
     Status,
 
     UpdateRpc,
-}
+
+    PetalsStart {
+        #[arg(long)]
+        model: String,
+
+        #[arg(long, default_value = "50052")]
+        port: u16,
+
+        #[arg(long)]
+        quantize: Option<String>,
+    },
 
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -52,6 +62,8 @@ pub async fn run() -> anyhow::Result<()> {
         Commands::Install     => handlers::install().await,
         Commands::Status      => handlers::status().await,
         Commands::UpdateRpc   => handlers::update_rpc().await,
+        Commands::PetalsStart { model, port, quantize } =>
+            handlers::start_petals(&model, port, quantize).await,
     }
 }
 
@@ -60,7 +72,7 @@ mod handlers {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
-    use crate::{auth, config, gpu, queue_client::QueueClient, rpc, wireguard};
+    use crate::{auth, config, gpu, petals, queue_client::QueueClient, rpc, wireguard};
 
     pub fn clean() -> Result<()> {
         println!("Cleaning up akai-agent data...");
@@ -470,6 +482,15 @@ mod handlers {
             false => println!("rpc-server is already up to date ({})", current),
         }
         Ok(())
+    }
+
+    pub async fn start_petals(model: &str, port: u16, quantize: Option<String>) -> Result<()> {
+        println!("Starting Petals worker for model: {}", model);
+        println!("Port: {}", port);
+        if let Some(ref q) = quantize {
+            println!("Quantization: {}", q);
+        }
+        petals::run_petals_worker(model.to_string(), port, quantize).await
     }
 
     fn is_not_found(e: &anyhow::Error) -> bool {
