@@ -333,10 +333,8 @@ mod handlers {
             });
         }
 
-        let mut heartbeat_tick  = tokio::time::interval(Duration::from_secs(30));
-        let mut tunnel_tick     = tokio::time::interval(Duration::from_secs(120));
+let mut tunnel_tick     = tokio::time::interval(Duration::from_secs(120));
         let mut update_tick     = tokio::time::interval(Duration::from_secs(86400));
-        heartbeat_tick.tick().await;
         tunnel_tick.tick().await;
         update_tick.tick().await;
 
@@ -345,114 +343,12 @@ mod handlers {
 
         loop {
             tokio::select! {
-                _ = heartbeat_tick.tick() => {
-                    if use_tunnel && !tunnel_connected.load(Ordering::Relaxed) {
-                        eprintln!("mTLS tunnel not connected — skipping heartbeat");
-                        continue;
-                    }
-
-                    if !use_tunnel && !wireguard::check_tunnel(&cfg.wg_ip) {
-                        eprintln!("WireGuard tunnel is down — pausing heartbeats until re-established");
-                        match wireguard::ensure_tunnel(&cfg.wg_ip) {
-                            Ok(()) => println!("WireGuard tunnel re-established — resuming"),
-                            Err(e) => {
-                                eprintln!("Cannot re-establish tunnel: {e}");
-                                eprintln!("Workers will be unreachable. Will retry next cycle.");
-                                continue;
-                            }
-                        }
-                    }
-
+                _ = tunnel_tick.tick() => {
                     if matches!(child.try_wait(), Ok(Some(_))) {
                         eprintln!("rpc-server exited — respawning...");
                         child = rpc::spawn_rpc_server(&rpc_path, cfg.rpc_port)?;
                         println!("rpc-server restarted on :{}", cfg.rpc_port);
                     }
-
-                    let hub_reachable = true;
-
-                    match client.heartbeat(
-                        &cfg.worker_id, cfg.gpu, cfg.vram_gb, cfg.rpc_port, hub_reachable
-                    ).await {
-                        Ok(resp) => {
-                            let tunnel_ok = if use_tunnel { tunnel_connected.load(Ordering::Relaxed) } else { true };
-                            tracing::info!("Heartbeat OK (tunnel={}, hub={})", tunnel_ok, hub_reachable);
-
-                            // Check if model changed — restart petals if needed
-                            if !resp.model.is_empty() {
-                                if resp.model != cfg.petals_model || petals_child.as_mut().is_none() {
-                                    if !resp.model.is_empty() {
-                                        eprintln!("Model set/changed: {}. Starting petals...", resp.model);
-                                        // Kill existing petals process
-                                        if let Some(mut child) = petals_child.take() {
-                                            child.kill().await.ok();
-                                            child.wait().await.ok();
-                                        }
-                                        // Start new petals process
-                                        let args = petals::petals_args(&resp.model, 50052);
-                                        let mut cmd = tokio::process::Command::new("python3");
-                                        cmd.args(&args);
-                                        cmd.stdout(Stdio::piped());
-                                        cmd.stderr(Stdio::piped());
-                                        match cmd.spawn() {
-                                            Ok(child) => {
-                                                petals_child = Some(child);
-                                                cfg.petals_model = resp.model.clone();
-                                                config::save_config(&cfg).ok();
-                                                println!("Petals server started for model: {}", resp.model);
-                                            }
-                                            Err(e) => eprintln!("Failed to start petals: {e}"),
-                                        }
-                                    }
-                                }
-                            }
-
-                            let my_commit = rpc::rpc_commit_hash();
-                            if !resp.hub_commit.is_empty() && !my_commit.is_empty() && my_commit != resp.hub_commit {
-                                eprintln!("Hub commit mismatch: hub={}, local={}. Rebuilding rpc-server...", resp.hub_commit, my_commit);
-                                child.kill().ok();
-                                child.wait().ok();
-                                let old_binary = std::path::PathBuf::from(&cfg.rpc_binary);
-                                if old_binary.exists() {
-                                    let _ = std::fs::remove_file(&old_binary);
-                                }
-                                match rpc::ensure_rpc_server().await {
-                                    Ok(new_path) => {
-                                        rpc_path = new_path;
-                                        if let Ok(new_cfg) = crate::config::load_config() {
-                                            *cfg = new_cfg;
-                                        }
-                                        child = rpc::spawn_rpc_server(&rpc_path, cfg.rpc_port)?;
-                                        println!("rpc-server rebuilt and restarted (hub commit: {})", resp.hub_commit);
-                                    }
-                                    Err(e) => eprintln!("Rebuild failed: {e}"),
-                                }
-                            }
-                        }
-                        Err(e) if is_not_found(&e) => {
-                            eprintln!("Not in registry — re-registering...");
-                            if use_tunnel {
-                                let _ = client.register(
-                                    &cfg.worker_id, &cfg.worker_name,
-                                    &cfg.wg_ip, &cfg.wg_peer_id,
-                                    cfg.gpu, cfg.vram_gb, cfg.rpc_port,
-                                    None,
-                                ).await;
-                            } else {
-                                let wg_pub = crate::wireguard::get_wg_public_key();
-                                let _ = client.register(
-                                    &cfg.worker_id, &cfg.worker_name,
-                                    &cfg.wg_ip, &cfg.wg_peer_id,
-                                    cfg.gpu, cfg.vram_gb, cfg.rpc_port,
-                                    wg_pub,
-                                ).await;
-                            }
-                        }
-                        Err(e) => eprintln!("Heartbeat failed: {e}"),
-                    }
-                }
-
-                _ = tunnel_tick.tick() => {
                     if !use_tunnel && !wireguard::check_tunnel(&cfg.wg_ip) {
                         eprintln!("Periodic check: WireGuard tunnel is down");
                         match wireguard::ensure_tunnel(&cfg.wg_ip) {
