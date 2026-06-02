@@ -399,154 +399,127 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                         }
                                     };
 
-                    match msg {
-                        HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
-                            info!("Received heartbeat forward from hub, {} workers in pipeline", pipeline_info.workers.len());
-                            
-                            let pipeline_owned = pipeline_info.clone();
-                            let my_id = &config.worker_id;
-                            if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| &w.worker_id == my_id) {
-                                if my_worker.is_first {
-                                    info!("I am the first worker in pipeline, reporting status to hub before forwarding");
-                                    let hub_addr = format!("{}:{}", config.hub_addr.split(':').next().unwrap_or("127.0.0.1"), 50051);
-                                    if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
-                                        let pipeline_guard = pipeline.read().await;
-                                        let hb = WorkerHeartbeat {
-                                            worker_id: config.worker_id.clone(),
-                                            load: 0.0,
-                                            layer_offset: pipeline_guard.layer_offset,
-                                            num_layers: pipeline_guard.num_layers,
-                                            has_gpu: config.has_gpu,
-                                            vram_gb: config.vram_gb,
-                                            active: true,
-                                            last_hop_connected: my_worker.last_hop.is_some(),
-                                            next_hop_connected: true,
-                                        };
-                                        let msg = HubMessage::Heartbeat(hb);
-                                        let data = serde_json::to_vec(&msg).unwrap();
-                                        hub_stream.write_all(&data).await.ok();
-                                        info!("Sent heartbeat status to hub as first worker");
-                                    }
-                                } else if my_worker.is_last {
-                                    info!("I am the last worker in pipeline, reporting status to hub");
-                                    let hub_addr = format!("{}:{}", config.hub_addr.split(':').next().unwrap_or("127.0.0.1"), 50051);
-                                    if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
-                                        let pipeline_guard = pipeline.read().await;
-                                        let hb = WorkerHeartbeat {
-                                            worker_id: config.worker_id.clone(),
-                                            load: 0.0,
-                                            layer_offset: pipeline_guard.layer_offset,
-                                            num_layers: pipeline_guard.num_layers,
-                                            has_gpu: config.has_gpu,
-                                            vram_gb: config.vram_gb,
-                                            active: true,
-                                            last_hop_connected: true,
-                                            next_hop_connected: false,
-                                        };
-                                        let msg = HubMessage::Heartbeat(hb);
-                                        let data = serde_json::to_vec(&msg).unwrap();
-                                        hub_stream.write_all(&data).await.ok();
-                                        info!("Sent heartbeat status to hub as last worker");
-                                    }
-                                }
-                                
-                                if let Some(ref hop) = my_worker.next_hop {
-                                    let hop_worker_id = hop.worker_id.clone();
-                                    let hop_host = hop.host.clone();
-                                    let hop_port = hop.port;
-                                    let addr = format!("{}:{}", hop_host, hop_port);
-                                    info!("Forwarding heartbeat to next hop: {} at {}", hop_worker_id, addr);
-                                    match tokio::net::TcpStream::connect(&addr).await {
-                                        Ok(mut forward_stream) => {
-                                            let msg = HubMessage::HeartbeatForward { pipeline: pipeline_owned };
-                                            let data = serde_json::to_vec(&msg).unwrap();
-                                            forward_stream.write_all(&data).await.ok();
-                                            info!("Heartbeat forwarded to {}", hop_worker_id);
+                                    match msg {
+                                        HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
+                                            info!("Received heartbeat forward from hub, {} workers in pipeline", pipeline_info.workers.len());
+                                            
+                                            let pipeline_owned = pipeline_info.clone();
+                                            let my_id = &config.worker_id;
+                                            if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| &w.worker_id == my_id) {
+                                                if my_worker.is_first {
+                                                    info!("I am the first worker in pipeline, reporting status to hub before forwarding");
+                                                    let hub_addr = format!("{}:{}", config.hub_addr.split(':').next().unwrap_or("127.0.0.1"), 50051);
+                                                    if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
+                                                        let pipeline_guard = pipeline.read().await;
+                                                        let hb = WorkerHeartbeat {
+                                                            worker_id: config.worker_id.clone(),
+                                                            load: 0.0,
+                                                            layer_offset: pipeline_guard.layer_offset,
+                                                            num_layers: pipeline_guard.num_layers,
+                                                            has_gpu: config.has_gpu,
+                                                            vram_gb: config.vram_gb,
+                                                            active: true,
+                                                            last_hop_connected: my_worker.last_hop.is_some(),
+                                                            next_hop_connected: true,
+                                                        };
+                                                        let msg = HubMessage::Heartbeat(hb);
+                                                        let data = serde_json::to_vec(&msg).unwrap();
+                                                        hub_stream.write_all(&data).await.ok();
+                                                        info!("Sent heartbeat status to hub as first worker");
+                                                    }
+                                                } else if my_worker.is_last {
+                                                    info!("I am the last worker in pipeline, reporting status to hub");
+                                                    let hub_addr = format!("{}:{}", config.hub_addr.split(':').next().unwrap_or("127.0.0.1"), 50051);
+                                                    if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
+                                                        let pipeline_guard = pipeline.read().await;
+                                                        let hb = WorkerHeartbeat {
+                                                            worker_id: config.worker_id.clone(),
+                                                            load: 0.0,
+                                                            layer_offset: pipeline_guard.layer_offset,
+                                                            num_layers: pipeline_guard.num_layers,
+                                                            has_gpu: config.has_gpu,
+                                                            vram_gb: config.vram_gb,
+                                                            active: true,
+                                                            last_hop_connected: true,
+                                                            next_hop_connected: false,
+                                                        };
+                                                        let msg = HubMessage::Heartbeat(hb);
+                                                        let data = serde_json::to_vec(&msg).unwrap();
+                                                        hub_stream.write_all(&data).await.ok();
+                                                        info!("Sent heartbeat status to hub as last worker");
+                                                    }
+                                                }
+                                                
+                                                if let Some(ref hop) = my_worker.next_hop {
+                                                    let hop_worker_id = hop.worker_id.clone();
+                                                    let hop_host = hop.host.clone();
+                                                    let hop_port = hop.port;
+                                                    let addr = format!("{}:{}", hop_host, hop_port);
+                                                    info!("Forwarding heartbeat to next hop: {} at {}", hop_worker_id, addr);
+                                                    match tokio::net::TcpStream::connect(&addr).await {
+                                                        Ok(mut forward_stream) => {
+                                                            let msg = HubMessage::HeartbeatForward { pipeline: pipeline_owned };
+                                                            let data = serde_json::to_vec(&msg).unwrap();
+                                                            forward_stream.write_all(&data).await.ok();
+                                                            info!("Heartbeat forwarded to {}", hop_worker_id);
+                                                        }
+                                                        Err(e) => {
+                                                            warn!("Failed to forward heartbeat to {}: {}", hop_worker_id, e);
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
-                                        Err(e) => {
-                                            warn!("Failed to forward heartbeat to {}: {}", hop_worker_id, e);
+                                        HubMessage::HeartbeatResponse(resp) => {
+                                            info!("Received heartbeat response: layers {} to {}, model={}, pipeline={}",
+                                                resp.layer_offset, resp.num_layers, resp.model_name, resp.pipeline.is_some());
+
+                                            let mut pipeline_guard = pipeline.write().await;
+                                            
+                                            if resp.reassign || pipeline_guard.num_layers == 0 {
+                                                pipeline_guard.layer_offset = resp.layer_offset;
+                                                pipeline_guard.num_layers = resp.num_layers;
+                                            }
+
+                                            if let Some(pl) = resp.pipeline {
+                                                for w in &pl.workers {
+                                                    if w.worker_id == config.worker_id {
+                                                        pipeline_guard.last_hop = w.last_hop.clone();
+                                                        pipeline_guard.next_hop = w.next_hop.clone();
+                                                        pipeline_guard.is_first = w.is_first;
+                                                        pipeline_guard.is_last = w.is_last;
+                                                        break;
+                                                    }
+                                                }
+                                                
+                                                if pipeline_guard.num_layers > 0 {
+                                                    info!("Spawning rpc-server for layers {} to {}...",
+                                                        pipeline_guard.layer_offset, pipeline_guard.layer_offset + pipeline_guard.num_layers);
+
+                                                    let rpc_path = crate::rpc::rpc_binary_path();
+                                                    if !rpc_path.exists() {
+                                                        info!("Downloading rpc-server...");
+                                                        crate::rpc::ensure_rpc_server().await
+                                                            .context("Failed to download rpc-server")?;
+                                                    }
+
+                                                    let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port)?;
+                                                    rpc_child.lock().await.replace(child);
+                                                    info!("rpc-server started on port {}", config.rpc_port);
+                                                }
+                                            }
                                         }
-                                    }
-                                }
-                            }
-                        }
-                        HubMessage::HeartbeatResponse(resp) => {
-                            info!("Received heartbeat response: layers {} to {}, model={}, pipeline={}",
-                                resp.layer_offset, resp.num_layers, resp.model_name, resp.pipeline.is_some());
-
-                            let mut pipeline_guard = pipeline.write().await;
-                            
-                            // Update assignment if needed
-                            if resp.reassign || pipeline_guard.num_layers == 0 {
-                                pipeline_guard.layer_offset = resp.layer_offset;
-                                pipeline_guard.num_layers = resp.num_layers;
-                            }
-
-                            // Update pipeline info
-                            if let Some(pl) = resp.pipeline {
-                                for w in &pl.workers {
-                                    if w.worker_id == config.worker_id {
-                                        pipeline_guard.last_hop = w.last_hop.clone();
-                                        pipeline_guard.next_hop = w.next_hop.clone();
-                                        pipeline_guard.is_first = w.is_first;
-                                        pipeline_guard.is_last = w.is_last;
-                                        break;
-                                    }
-                                }
-                                
-                                // Spawn rpc-server if we have assignment
-                                if pipeline_guard.num_layers > 0 {
-                                    info!("Spawning rpc-server for layers {} to {}...",
-                                        pipeline_guard.layer_offset, pipeline_guard.layer_offset + pipeline_guard.num_layers);
-
-                                    let rpc_path = crate::rpc::rpc_binary_path();
-                                    if !rpc_path.exists() {
-                                        info!("Downloading rpc-server...");
-                                        crate::rpc::ensure_rpc_server().await
-                                            .context("Failed to download rpc-server")?;
-                                    }
-
-                                    let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port)?;
-                                    rpc_child.lock().await.replace(child);
-                                    info!("rpc-server started on port {}", config.rpc_port);
-                                }
-                            }
-                        }
-                        HubMessage::PipelineInfo(pl) => {
-                            info!("Received pipeline update with {} workers", pl.workers.len());
-                            let mut pipeline_guard = pipeline.write().await;
-                            
-                            let mut new_next_hop = None;
-                            for w in &pl.workers {
-                                if w.worker_id == config.worker_id {
-                                    pipeline_guard.last_hop = w.last_hop.clone();
-                                    pipeline_guard.next_hop = w.next_hop.clone();
-                                    pipeline_guard.is_first = w.is_first;
-                                    pipeline_guard.is_last = w.is_last;
-                                    new_next_hop = w.next_hop.clone();
-                                    info!("  My neighbors: last_hop={:?}, next_hop={:?}",
-                                        pipeline_guard.last_hop, pipeline_guard.next_hop);
-                                    break;
-                                }
-                            }
-                            // Connect to next_hop if we have one and don't have a connection
-                            if let Some(next_hop) = new_next_hop {
-                                if pipeline_guard.next_hop_stream.is_none() {
-                                    drop(pipeline_guard);
-                                    let pipeline_clone = pipeline.clone();
-                                    let next_hop_clone = next_hop.clone();
-                                    tokio::spawn(async move {
-                                        if let Err(e) = connect_to_next_hop(next_hop_clone, pipeline_clone).await {
-                                            error!("Failed to connect to next_hop: {}", e);
+                                        HubMessage::Error { code, message } => {
+                                            error!("Hub error {}: {}", code, message);
                                         }
-                                    });
+                                        _ => {}
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Read error: {}", e);
                                 }
                             }
                         }
-                        HubMessage::Error { code, message } => {
-                            error!("Hub error {}: {}", code, message);
-                        }
-                        _ => {}
                     }
                 }
             }
