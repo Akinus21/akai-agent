@@ -356,10 +356,11 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
         std::process::exit(0);
     });
 
+    // Persistent connection to hub
     loop {
         match tokio::net::TcpStream::connect(&config.hub_addr).await {
             Ok(mut stream) => {
-                info!("Connected to hub");
+                info!("Connected to hub, registering...");
 
                 // Register with hub
                 let worker_info = WorkerInfo {
@@ -377,23 +378,26 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                 let register = HubMessage::Register(worker_info);
                 let data = serde_json::to_vec(&register)?;
                 stream.write_all(&data).await?;
-                info!("Registered with hub, waiting for layer assignment...");
+                info!("Registered with hub, maintaining persistent connection...");
 
-                // Main communication loop
+                // Keep connection alive for cascade messages
                 let mut buf = vec![0u8; 65536];
-                while let Ok(n) = stream.read(&mut buf).await {
-                    if n == 0 {
-                        warn!("Connection closed by hub");
-                        break;
-                    }
-
-                    let msg: HubMessage = match serde_json::from_slice(&buf[..n]) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            error!("Failed to parse message: {}", e);
-                            continue;
-                        }
-                    };
+                loop {
+                    tokio::select! {
+                        n = stream.read(&mut buf) => {
+                            match n {
+                                Ok(0) => {
+                                    info!("Hub connection closed, reconnecting...");
+                                    break;
+                                }
+                                Ok(n) => {
+                                    let msg: HubMessage = match serde_json::from_slice(&buf[..n]) {
+                                        Ok(m) => m,
+                                        Err(e) => {
+                                            error!("Failed to parse message: {}", e);
+                                            continue;
+                                        }
+                                    };
 
                     match msg {
                         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
