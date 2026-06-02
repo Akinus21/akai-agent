@@ -349,7 +349,8 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         eprintln!("Shutting down worker...");
-        if let Some(mut child) = rpc_child_clone.lock().await.unwrap().take() {
+        let opt_child = rpc_child_clone.lock().await.take();
+        if let Some(mut child) = opt_child {
             child.kill().ok();
         }
         std::process::exit(0);
@@ -432,7 +433,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                     }
 
                                     let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port)?;
-                                    *rpc_child.lock().await.unwrap() = Some(child);
+                                    rpc_child.lock().await.replace(child);
                                     info!("rpc-server started on port {}", config.rpc_port);
                                 }
                             }
