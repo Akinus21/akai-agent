@@ -403,17 +403,20 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                             let my_id = &config.worker_id;
                             if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| &w.worker_id == my_id) {
                                 if let Some(ref hop) = my_worker.next_hop {
-                                    let addr = format!("{}:{}", hop.host, hop.port);
-                                    info!("Forwarding heartbeat to next hop: {} at {}", hop.worker_id, addr);
+                                    let hop_worker_id = hop.worker_id.clone();
+                                    let hop_host = hop.host.clone();
+                                    let hop_port = hop.port;
+                                    let addr = format!("{}:{}", hop_host, hop_port);
+                                    info!("Forwarding heartbeat to next hop: {} at {}", hop_worker_id, addr);
                                     match tokio::net::TcpStream::connect(&addr).await {
                                         Ok(mut forward_stream) => {
                                             let msg = HubMessage::HeartbeatForward { pipeline: pipeline_owned };
                                             let data = serde_json::to_vec(&msg).unwrap();
                                             forward_stream.write_all(&data).await.ok();
-                                            info!("Heartbeat forwarded to {}", hop.worker_id);
+                                            info!("Heartbeat forwarded to {}", hop_worker_id);
                                         }
                                         Err(e) => {
-                                            warn!("Failed to forward heartbeat to {}: {}", hop.worker_id, e);
+                                            warn!("Failed to forward heartbeat to {}: {}", hop_worker_id, e);
                                         }
                                     }
                                 } else {
