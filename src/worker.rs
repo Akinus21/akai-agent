@@ -402,6 +402,50 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                             let pipeline_owned = pipeline_info.clone();
                             let my_id = &config.worker_id;
                             if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| &w.worker_id == my_id) {
+                                if my_worker.is_first {
+                                    info!("I am the first worker in pipeline, reporting status to hub before forwarding");
+                                    let hub_addr = format!("{}:{}", config.hub_addr.split(':').next().unwrap_or("127.0.0.1"), 50051);
+                                    if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
+                                        let pipeline_guard = pipeline.read().await;
+                                        let hb = WorkerHeartbeat {
+                                            worker_id: config.worker_id.clone(),
+                                            load: 0.0,
+                                            layer_offset: pipeline_guard.layer_offset,
+                                            num_layers: pipeline_guard.num_layers,
+                                            has_gpu: config.has_gpu,
+                                            vram_gb: config.vram_gb,
+                                            active: true,
+                                            last_hop_connected: my_worker.last_hop.is_some(),
+                                            next_hop_connected: true,
+                                        };
+                                        let msg = HubMessage::Heartbeat(hb);
+                                        let data = serde_json::to_vec(&msg).unwrap();
+                                        hub_stream.write_all(&data).await.ok();
+                                        info!("Sent heartbeat status to hub as first worker");
+                                    }
+                                } else if my_worker.is_last {
+                                    info!("I am the last worker in pipeline, reporting status to hub");
+                                    let hub_addr = format!("{}:{}", config.hub_addr.split(':').next().unwrap_or("127.0.0.1"), 50051);
+                                    if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
+                                        let pipeline_guard = pipeline.read().await;
+                                        let hb = WorkerHeartbeat {
+                                            worker_id: config.worker_id.clone(),
+                                            load: 0.0,
+                                            layer_offset: pipeline_guard.layer_offset,
+                                            num_layers: pipeline_guard.num_layers,
+                                            has_gpu: config.has_gpu,
+                                            vram_gb: config.vram_gb,
+                                            active: true,
+                                            last_hop_connected: true,
+                                            next_hop_connected: false,
+                                        };
+                                        let msg = HubMessage::Heartbeat(hb);
+                                        let data = serde_json::to_vec(&msg).unwrap();
+                                        hub_stream.write_all(&data).await.ok();
+                                        info!("Sent heartbeat status to hub as last worker");
+                                    }
+                                }
+                                
                                 if let Some(ref hop) = my_worker.next_hop {
                                     let hop_worker_id = hop.worker_id.clone();
                                     let hop_host = hop.host.clone();
@@ -418,28 +462,6 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                         Err(e) => {
                                             warn!("Failed to forward heartbeat to {}: {}", hop_worker_id, e);
                                         }
-                                    }
-                                } else {
-                                    info!("This is the last worker in pipeline, sending heartbeat back to hub");
-                                    let hub_port = std::env::var("HUB_PORT").unwrap_or_else(|_| "50051".to_string());
-                                    let hub_addr = format!("{}:{}", config.hub_addr.split(':').next().unwrap_or("127.0.0.1"), hub_port);
-                                    if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
-                                        let pipeline_guard = pipeline.read().await;
-                                        let hb = WorkerHeartbeat {
-                                            worker_id: config.worker_id.clone(),
-                                            load: 0.0,
-                                            layer_offset: pipeline_guard.layer_offset,
-                                            num_layers: pipeline_guard.num_layers,
-                                            has_gpu: config.has_gpu,
-                                            vram_gb: config.vram_gb,
-                                            active: true,
-                                            last_hop_connected: my_worker.last_hop.is_some(),
-                                            next_hop_connected: false,
-                                        };
-                                        let msg = HubMessage::Heartbeat(hb);
-                                        let data = serde_json::to_vec(&msg).unwrap();
-                                        hub_stream.write_all(&data).await.ok();
-                                        info!("Sent cascade heartbeat back to hub");
                                     }
                                 }
                             }
