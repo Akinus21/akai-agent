@@ -35,6 +35,8 @@ pub enum HubMessage {
     Register(WorkerInfo),
     #[serde(rename = "heartbeat")]
     Heartbeat(WorkerHeartbeat),
+    #[serde(rename = "heartbeat_response")]
+    HeartbeatResponse(HeartbeatResponse),
     #[serde(rename = "heartbeat_forward")]
     HeartbeatForward { pipeline: PipelineInfo },
     #[serde(rename = "inference_request")]
@@ -143,10 +145,13 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
 
     let worker_info = WorkerInfo {
         id: config.worker_id.clone(),
+        name: config.worker_id.clone(),
         layer_offset: config.layer_offset,
         num_layers: config.num_layers,
         vram_gb: config.vram_gb,
         has_gpu: config.has_gpu,
+        wg_ip: String::new(),
+        rpc_port: 0,
     };
 
     let llama_port = 8080u16;
@@ -344,7 +349,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         eprintln!("Shutting down worker...");
-        if let Some(mut child) = rpc_child_clone.lock().unwrap().take() {
+        if let Some(mut child) = rpc_child_clone.lock().await.unwrap().take() {
             child.kill().ok();
         }
         std::process::exit(0);
@@ -427,7 +432,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                     }
 
                                     let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port)?;
-                                    *rpc_child.lock().unwrap() = Some(child);
+                                    *rpc_child.lock().await.unwrap() = Some(child);
                                     info!("rpc-server started on port {}", config.rpc_port);
                                 }
                             }
