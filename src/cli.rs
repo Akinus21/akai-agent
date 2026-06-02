@@ -13,97 +13,34 @@ pub struct Cli {
 pub enum Commands {
     Init {
         #[arg(long)]
-        queue: String,
+        hub: String,
 
         #[arg(long)]
         username: String,
-
-        #[arg(long)]
-        name: Option<String>,
-
-        #[arg(long, default_value = "50052")]
-        rpc_port: u16,
-
-        #[arg(long)]
-        hub_wg_ip: Option<String>,
-
-        #[arg(long)]
-        hub_port: Option<u16>,
     },
 
     Clean,
 
     Start,
 
-    StartWorker {
-        #[arg(long)]
-        hub_addr: String,
-
-        #[arg(long)]
-        worker_id: String,
-
-        #[arg(long)]
-        model_path: String,
-
-        #[arg(long, default_value = "0")]
-        layer_offset: usize,
-
-        #[arg(long, default_value = "32")]
-        num_layers: usize,
-    },
-
-    Install,
-
-    Status,
-
-    UpdateRpc,
-
-    PetalsStart {
-        #[arg(long)]
-        model: String,
-
-        #[arg(long, default_value = "50052")]
-        port: u16,
-
-        #[arg(long)]
-        quantize: Option<String>,
-    },
-
-    Chmod {
-        #[arg(help = "Model reference (e.g., hf.co/author/model:Q5_K_S) or direct GGUF URL")]
-        model: String,
-
-        #[arg(long, help = "Total number of layers in the model (e.g., 32 for Llama-7B)")]
-        layers: usize,
-    },
+    Stop,
 }
 
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Init { queue, username, name, rpc_port, hub_wg_ip, hub_port } =>
-            handlers::init(&queue, &username, name, rpc_port, hub_wg_ip, hub_port).await,
+        Commands::Init { hub, username } =>
+            handlers::init(&hub, &username).await,
         Commands::Clean       => handlers::clean(),
         Commands::Start       => handlers::start().await,
-        Commands::StartWorker { hub_addr, worker_id, model_path, layer_offset, num_layers } =>
-            handlers::start_worker(&hub_addr, &worker_id, &model_path, layer_offset, num_layers).await,
-        Commands::Install     => handlers::install().await,
-        Commands::Status      => handlers::status().await,
-        Commands::UpdateRpc   => handlers::update_rpc().await,
-        Commands::PetalsStart { model, port, quantize } =>
-            handlers::start_petals(&model, port, quantize).await,
-        Commands::Chmod { model, layers } =>
-            handlers::chmod(&model, layers).await,
+        Commands::Stop        => handlers::stop(),
     }
 }
 
 mod handlers {
     use anyhow::{Context, Result};
-    use std::process::Stdio;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use std::time::Duration;
-    use crate::{auth, config, gpu, petals, queue_client::QueueClient, rpc, wireguard, worker};
+    use std::fs;
+    use crate::{config, gpu, worker};
 
     pub fn clean() -> Result<()> {
         println!("Cleaning up akai-agent data...");
@@ -129,433 +66,105 @@ mod handlers {
         Ok(())
     }
 
-    pub async fn init(
-        queue_url: &str,
-        username:  &str,
-        name:      Option<String>,
-        rpc_port:  u16,
-        hub_wg_ip: Option<String>,
-        hub_port: Option<u16>,
-    ) -> Result<()> {
-        let device_name = name.unwrap_or_else(||
-            hostname::get()
-                .map(|h| h.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "akai-worker".to_string())
-        );
+    pub async fn init(hub: &str, username: &str) -> Result<()> {
+        let device_name = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "akai-worker".to_string());
         let worker_id = format!("{}:{}", username, device_name);
 
-        println!("Initializing akai-agent for user \"{}\" as \"{}\"", username, worker_id);
-
-        let (_, public_key) = auth::ensure_keypair()?;
+        println!("Initializing akai-agent worker");
+        println!("  Hub:      {}", hub);
+        println!("  Worker:   {}", worker_id);
 
         let gpu_info = gpu::detect_gpu();
         if gpu_info.has_gpu {
-            println!("GPU: {} ({:.1} GB VRAM, {})", gpu_info.name, gpu_info.vram_gb, gpu_info.backend);
+            println!("  GPU:      {} ({:.1} GB)", gpu_info.name, gpu_info.vram_gb);
         } else {
-            println!("No GPU detected (CPU-only worker)");
-        }
-
-        let client = QueueClient::new(queue_url, username);
-        println!("Authenticating as '{}' with queue at {}...", username, queue_url);
-
-        let provision = match client.auth_register(&device_name, &public_key).await {
-            Ok(p) => {
-                println!("Authenticated with existing key.");
-                p
-            }
-            Err(e) if e.to_string().starts_with("AUTH_REQUIRED:") => {
-                println!("New worker — Duo 2FA required.");
-                client.auth_duo(&device_name, &public_key).await
-                    .context("Duo 2FA failed")?
-            }
-            Err(e) => return Err(e),
-        };
-
-        println!("Downloading rpc-server...");
-        let rpc_path = rpc::ensure_rpc_server().await
-            .context("Failed to download rpc-server binary")?;
-        let rpc_version = rpc::current_version();
-        println!("rpc-server ready at {}", rpc_path.display());
-
-        let wg_ip = provision.wg_ip.clone().unwrap_or_default();
-        let peer_id = provision.peer_id.clone().unwrap_or_default();
-
-        match client.register(
-            &worker_id,
-            &device_name,
-            &wg_ip,
-            &peer_id,
-            gpu_info.has_gpu,
-            gpu_info.vram_gb,
-            rpc_port,
-            None,
-        ).await {
-            Ok(_)  => println!("Registered with queue"),
-            Err(e) => eprintln!("Registration failed: {}. Retry with `akai-agent start`.", e),
+            println!("  GPU:      CPU only");
         }
 
         let mut cfg = config::Config {
-            queue_url:   queue_url.to_string(),
+            queue_url:   String::new(),
             api_key:     String::new(),
             worker_id:   worker_id.clone(),
             worker_name: device_name.clone(),
-            wg_ip:       wg_ip.clone(),
-            wg_peer_id:  peer_id.clone(),
-            rpc_port,
+            wg_ip:       String::new(),
+            wg_peer_id:  String::new(),
+            rpc_port:    50052,
             gpu:         gpu_info.has_gpu,
             vram_gb:     gpu_info.vram_gb,
             gpu_backend: gpu_info.backend.to_string(),
-            rpc_binary:  rpc_path.to_string_lossy().to_string(),
-            rpc_version,
+            rpc_binary:  String::new(),
+            rpc_version: String::new(),
             username:    username.to_string(),
-            public_key,
+            public_key:  String::new(),
             tunnel_host: String::new(),
             tunnel_port: 0,
-            hub_wg_ip: hub_wg_ip.unwrap_or_default(),
-            hub_port: hub_port.unwrap_or(8080),
+            hub_wg_ip:   String::new(),
+            hub_port:    50051,
             petals_model: String::new(),
-            hub_addr: String::new(),
+            hub_addr:    hub.to_string(),
         };
-
-        println!();
-        println!("Fetching tunnel certificates...");
-        match fetch_tunnel_certs(&mut cfg, &queue_url, &username).await {
-            Ok(()) => {},
-            Err(e) => eprintln!("Tunnel cert fetch failed: {}. Run `akai-agent start` to retry.", e),
-        }
 
         config::save_config(&cfg)?;
         println!("Config saved to {}", config::config_path().display());
 
         println!();
         println!("Initialization complete!");
-        println!("   Run:  akai-agent start");
-        println!("   Or:   sudo akai-agent install");
+        println!("   Run:  sudo akai-agent start");
+        Ok(())
+    }
+
+    pub fn stop() -> Result<()> {
+        let pid_file = std::path::Path::new("/run/akai-agent.pid");
+        if pid_file.exists() {
+            let pid: i32 = std::fs::read_to_string(pid_file)?
+                .trim()
+                .parse()
+                .context("Invalid PID file")?;
+            println!("Stopping akai-agent (PID {})...", pid);
+            std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .status()?;
+            std::fs::remove_file(pid_file)?;
+            println!("Stopped.");
+        } else {
+            println!("Not running (no PID file).");
+        }
         Ok(())
     }
 
     pub async fn start() -> Result<()> {
-        let mut cfg = config::load_config()
+        let cfg = config::load_config()
             .context("Config not found. Run `akai-agent init` first.")?;
 
-        // Check if HUB_ADDR is set for new architecture
-        if let Ok(hub_addr) = std::env::var("HUB_ADDR") {
-            println!("Starting akai-agent in hub mode");
-            println!("  Hub:       {}", hub_addr);
-            println!("  Worker:    {}", cfg.worker_id);
-
-            let gpu_info = gpu::detect_gpu();
-            if gpu_info.has_gpu {
-                println!("  GPU:       {} ({:.1} GB)", gpu_info.name, gpu_info.vram_gb);
-            } else {
-                println!("  GPU:       CPU only");
-            }
-
-            worker::run_hub_worker(worker::HubWorkerConfig {
-                hub_addr,
-                worker_id: cfg.worker_id.clone(),
-                has_gpu: gpu_info.has_gpu,
-                vram_gb: gpu_info.vram_gb as f32,
-                rpc_port: cfg.rpc_port,
-            }).await
+        let hub_addr = if !cfg.hub_addr.is_empty() {
+            cfg.hub_addr.clone()
         } else {
-            // Legacy queue-based start
-            start_queue_worker(&mut cfg).await
-        }
-    }
-
-    async fn start_queue_worker(cfg: &mut config::Config) -> Result<()> {
-        println!("Starting akai-agent (queue mode)");
-        println!("  Worker:    {}", cfg.worker_id);
-        println!("  Queue:     {}", cfg.queue_url);
-        println!("  RPC port:  {}", cfg.rpc_port);
-
-        let use_tunnel = !cfg.tunnel_host.is_empty();
-        let tunnel_connected: Arc<AtomicBool> = Arc::new(AtomicBool::new(!use_tunnel));
-
-        if use_tunnel {
-            println!("  Tunnel:    {}:{}", cfg.tunnel_host, cfg.tunnel_port);
-        } else {
-            println!("  WireGuard: {}", cfg.wg_ip);
-        }
-
-        if !use_tunnel {
-            println!("Verifying WireGuard tunnel...");
-            if !wireguard::check_tunnel(&cfg.wg_ip) {
-                eprintln!("  WireGuard tunnel is down — re-establishing...");
-                wireguard::ensure_tunnel(&cfg.wg_ip)
-                    .context("Failed to establish WireGuard tunnel. RPC workers will be unreachable.")?;
-            }
-        }
-
-        let client = QueueClient::from_config(cfg);
-
-        {
-            let client  = client.clone();
-            let id      = cfg.worker_id.clone();
-            tokio::spawn(async move {
-                tokio::signal::ctrl_c().await.ok();
-                eprintln!("Shutting down — deregistering...");
-                let _ = client.deregister(&id).await;
-                std::process::exit(0);
-            });
-        }
-
-        let mut rpc_path = rpc::ensure_rpc_server().await
-            .context("rpc-server binary not found")?;
-
-        let mut child = rpc::spawn_rpc_server(&rpc_path, cfg.rpc_port)
-            .context("Failed to spawn rpc-server")?;
-        println!("rpc-server running on 0.0.0.0:{}", cfg.rpc_port);
-
-        if use_tunnel {
-            let cert_dir = config::data_dir().join("tunnel-certs");
-            let ca = std::fs::read(cert_dir.join("ca.crt"))
-                .context("tunnel CA cert not found — run `akai-agent init` first")?;
-            let wcrt = std::fs::read(cert_dir.join("worker.crt"))
-                .context("tunnel worker cert not found — run `akai-agent init` first")?;
-            let wkey = std::fs::read(cert_dir.join("worker.key"))
-                .context("tunnel worker key not found — run `akai-agent init` first")?;
-            let tc = crate::tunnel::TunnelClient::new(
-                &cfg.tunnel_host,
-                cfg.tunnel_port,
-                &cfg.worker_id,
-                cfg.rpc_port,
-                ca,
-                wcrt,
-                wkey,
-                tunnel_connected.clone(),
-            );
-            tokio::spawn(async move {
-                if let Err(e) = tc.run().await {
-                    tracing::error!("tunnel client failed: {e}");
-                }
-            });
-        }
-
-let mut tunnel_tick     = tokio::time::interval(Duration::from_secs(120));
-        let mut update_tick     = tokio::time::interval(Duration::from_secs(86400));
-        tunnel_tick.tick().await;
-        update_tick.tick().await;
-
-        // Petals child process (if model is set via heartbeat)
-        let mut petals_child: Option<tokio::process::Child> = None;
-
-        loop {
-            tokio::select! {
-                _ = tunnel_tick.tick() => {
-                    if matches!(child.try_wait(), Ok(Some(_))) {
-                        eprintln!("rpc-server exited — respawning...");
-                        child = rpc::spawn_rpc_server(&rpc_path, cfg.rpc_port)?;
-                        println!("rpc-server restarted on :{}", cfg.rpc_port);
-                    }
-                    if !use_tunnel && !wireguard::check_tunnel(&cfg.wg_ip) {
-                        eprintln!("Periodic check: WireGuard tunnel is down");
-                        match wireguard::ensure_tunnel(&cfg.wg_ip) {
-                            Ok(()) => println!("WireGuard tunnel re-established"),
-                            Err(e) => eprintln!("Cannot re-establish tunnel: {e}"),
-                        }
-                    }
-                }
-
-                _ = update_tick.tick() => {
-                    match rpc::needs_update(&cfg.rpc_version).await {
-                        Ok(true) => {
-                            println!("New rpc-server available — updating...");
-                            child.kill().ok();
-                            child.wait().ok();
-                            if let Err(e) = rpc::download_latest().await {
-                                eprintln!("Update failed: {e}");
-                            } else {
-                                child = rpc::spawn_rpc_server(&rpc_path, cfg.rpc_port)?;
-                                println!("rpc-server updated and restarted");
-                            }
-                        }
-                        Ok(false) => tracing::debug!("rpc-server up to date"),
-                        Err(e)    => tracing::warn!("Update check failed: {e}"),
-                    }
-                }
-            }
-        }
-    }
-
-    pub async fn start_worker(
-        hub_addr: &str,
-        worker_id: &str,
-        model_path: &str,
-        layer_offset: usize,
-        num_layers: usize,
-    ) -> Result<()> {
-        let gpu_info = gpu::detect_gpu();
-
-        println!("Ensuring llama-server is available...");
-        let llama_server = rpc::ensure_llama_server().await
-            .context("Failed to download llama-server")?;
-        println!("llama-server: {}", llama_server.display());
-
-        let n_gpu_layers = if gpu_info.has_gpu { 99 } else { 0 };
-
-        let cfg = worker::WorkerConfig {
-            hub_addr: hub_addr.to_string(),
-            worker_id: worker_id.to_string(),
-            has_gpu: gpu_info.has_gpu,
-            vram_gb: gpu_info.vram_gb as f32,
-            layer_offset,
-            num_layers,
-            model_path: model_path.to_string(),
-            llama_server_path: Some(llama_server.to_string_lossy().to_string()),
-            n_gpu_layers,
+            std::env::var("HUB_ADDR").context("HUB_ADDR not set and no hub_addr in config")?
         };
 
-        worker::run_worker(cfg).await
-    }
+        println!("Starting akai-agent worker");
+        println!("  Hub:    {}", hub_addr);
+        println!("  Worker: {}", cfg.worker_id);
 
-    async fn fetch_tunnel_certs(cfg: &mut config::Config, queue_url: &str, username: &str) -> Result<()> {
-        let cert_dir = config::data_dir().join("tunnel-certs");
-        let ca_path = cert_dir.join("ca.crt");
-        let wcrt_path = cert_dir.join("worker.crt");
-        let wkey_path = cert_dir.join("worker.key");
-
-        if ca_path.exists() && wcrt_path.exists() && wkey_path.exists() {
-            println!("  Tunnel certs already exist at {}", cert_dir.display());
-            if cfg.tunnel_host.is_empty() || cfg.tunnel_port == 0 {
-                let client = QueueClient::new(queue_url, username);
-                let certs = client.fetch_tunnel_certs().await
-                    .context("Failed to fetch tunnel server info")?;
-                cfg.tunnel_host = certs.tunnel_host;
-                cfg.tunnel_port = certs.tunnel_port;
-                config::save_config(cfg)?;
-                println!("  Updated tunnel server: {}:{}", cfg.tunnel_host, cfg.tunnel_port);
-            }
-            return Ok(());
-        }
-
-        let client = QueueClient::new(queue_url, username);
-        let certs = client.fetch_tunnel_certs().await
-            .context("Failed to fetch tunnel certs")?;
-
-        std::fs::create_dir_all(&cert_dir)
-            .context("failed to create tunnel-certs directory")?;
-
-        std::fs::write(&ca_path, &certs.ca_cert)
-            .context("failed to write CA cert")?;
-        std::fs::write(&wcrt_path, &certs.worker_cert)
-            .context("failed to write worker cert")?;
-        std::fs::write(&wkey_path, &certs.worker_key)
-            .context("failed to write worker key")?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&wkey_path, std::fs::Permissions::from_mode(0x600))
-                .ok();
-        }
-
-        println!("  CA:     {}", ca_path.display());
-        println!("  Cert:   {}", wcrt_path.display());
-        println!("  Key:    {}", wkey_path.display());
-        println!("  Server: {}:{}", certs.tunnel_host, certs.tunnel_port);
-
-        cfg.tunnel_host = certs.tunnel_host;
-        cfg.tunnel_port = certs.tunnel_port;
-        config::save_config(cfg)?;
-
-        Ok(())
-    }
-
-    pub async fn install() -> Result<()> {
-        crate::service::install()
-    }
-
-    pub async fn status() -> Result<()> {
-        let cfg = config::load_config()
-            .context("Config not found. Run `akai-agent init` first.")?;
-        let client = QueueClient::from_config(&cfg);
-        match client.get_worker(&cfg.worker_id).await {
-            Ok(info) => {
-                println!("Worker:    {}", cfg.worker_id);
-                println!("Queue:     {}", cfg.queue_url);
-                println!("WireGuard: {}", cfg.wg_ip);
-                println!("RPC port:  {}", cfg.rpc_port);
-                println!("Status:    {}", if info.alive { "alive" } else { "dead" });
-            }
-            Err(e) => eprintln!("Could not reach queue: {e}"),
-        }
-        Ok(())
-    }
-
-    pub async fn update_rpc() -> Result<()> {
-        println!("Checking for rpc-server updates...");
-        let cfg = config::load_config().ok();
-        let current = cfg.as_ref().map(|c| c.rpc_version.as_str()).unwrap_or("unknown");
-
-        match rpc::needs_update(current).await? {
-            true => {
-                println!("Downloading latest rpc-server...");
-                rpc::download_latest().await?;
-                println!("rpc-server updated. Restart `akai-agent start` to use it.");
-            }
-            false => println!("rpc-server is already up to date ({})", current),
-        }
-        Ok(())
-    }
-
-    pub async fn start_petals(model: &str, port: u16, quantize: Option<String>) -> Result<()> {
-        println!("Starting Petals worker for model: {}", model);
-        println!("Port: {}", port);
-        if let Some(ref q) = quantize {
-            println!("Quantization: {}", q);
-        }
-        petals::run_petals_worker(model.to_string(), port, quantize).await
-    }
-
-    pub async fn chmod(model_ref: &str, layers: usize) -> Result<()> {
-        let cfg = config::load_config()
-            .context("Config not found. Run `akai-agent init` first.")?;
-
-        // Get hub address from config or env
-        let hub_addr = std::env::var("HUB_ADDR")
-            .unwrap_or_else(|_| {
-                // Extract host from queue_url for hub address
-                if let Ok(url) = reqwest::Url::parse(&cfg.queue_url) {
-                    format!("{}", url.host_str().unwrap_or("localhost"))
-                } else {
-                    cfg.get_hub_addr()
-                }
-            });
-
-        println!("Changing model on hub: {}", hub_addr);
-        println!("  Model: {}", model_ref);
-        println!("  Layers: {}", layers);
-        println!("  User: {}", cfg.username);
-
-        // Call hub admin API (no auth key needed - hub checks username against authorized list)
-        let client = reqwest::Client::new();
-        let resp = client.post(format!("http://{}/admin/model", hub_addr))
-            .json(&serde_json::json!({
-                "username": cfg.username,
-                "name": model_ref,
-                "layers": layers,
-                "url": model_ref,
-            }))
-            .send().await
-            .context("Failed to call hub admin API")?;
-
-        if resp.status().is_success() {
-            println!("✓ Model changed successfully");
-            let json: serde_json::Value = resp.json().await?;
-            println!("  New model: {}", json["model"]);
-            println!("  Layers: {}", json["layers"]);
+        let gpu_info = gpu::detect_gpu();
+        if gpu_info.has_gpu {
+            println!("  GPU:    {} ({:.1} GB)", gpu_info.name, gpu_info.vram_gb);
         } else {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Hub returned error {}: {}", status, body);
+            println!("  GPU:    CPU only");
         }
 
-        Ok(())
-    }
+        let pid_file = std::path::Path::new("/run/akai-agent.pid");
+        std::fs::write(pid_file, std::process::id().to_string())?;
+        println!("PID: {} (saved to {})", std::process::id(), pid_file.display());
 
-    fn is_not_found(e: &anyhow::Error) -> bool {
-        e.to_string().contains("404")
+        worker::run_hub_worker(worker::HubWorkerConfig {
+            hub_addr,
+            worker_id: cfg.worker_id.clone(),
+            has_gpu: gpu_info.has_gpu,
+            vram_gb: gpu_info.vram_gb as f32,
+            rpc_port: cfg.rpc_port,
+        }).await
     }
 }
