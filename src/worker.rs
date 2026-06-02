@@ -297,6 +297,7 @@ pub struct PipelineState {
     pub next_hop_connected: bool,
     pub is_first: bool,
     pub is_last: bool,
+    pub next_hop_stream: Option<Arc<Mutex<TcpStream>>>,
 }
 
 impl PipelineState {
@@ -311,6 +312,7 @@ impl PipelineState {
             next_hop_connected: false,
             is_first: false,
             is_last: false,
+            next_hop_stream: None,
         }
     }
 }
@@ -432,15 +434,30 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                             info!("Received pipeline update with {} workers", pl.workers.len());
                             let mut pipeline_guard = pipeline.write().await;
                             
+                            let mut new_next_hop = None;
                             for w in &pl.workers {
                                 if w.worker_id == config.worker_id {
                                     pipeline_guard.last_hop = w.last_hop.clone();
                                     pipeline_guard.next_hop = w.next_hop.clone();
                                     pipeline_guard.is_first = w.is_first;
                                     pipeline_guard.is_last = w.is_last;
+                                    new_next_hop = w.next_hop.clone();
                                     info!("  My neighbors: last_hop={:?}, next_hop={:?}",
                                         pipeline_guard.last_hop, pipeline_guard.next_hop);
                                     break;
+                                }
+                            }
+                            // Connect to next_hop if we have one and don't have a connection
+                            if let Some(next_hop) = new_next_hop {
+                                if pipeline_guard.next_hop_stream.is_none() {
+                                    drop(pipeline_guard);
+                                    let pipeline_clone = pipeline.clone();
+                                    let next_hop_clone = next_hop.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = connect_to_next_hop(next_hop_clone, pipeline_clone).await {
+                                            error!("Failed to connect to next_hop: {}", e);
+                                        }
+                                    });
                                 }
                             }
                         }
@@ -548,4 +565,28 @@ async fn handle_inbound_connection(
     }
     
     Ok(())
+}
+
+async fn connect_to_next_hop(
+    next_hop: HopInfo,
+    pipeline: Arc<RwLock<PipelineState>>,
+) -> Result<()> {
+    let addr = format!("{}:{}", next_hop.host, next_hop.port);
+    info!("Connecting to next_hop {} at {}", next_hop.worker_id, addr);
+    
+    match TcpStream::connect(&addr).await {
+        Ok(stream) => {
+            info!("Connected to next_hop {}", next_hop.worker_id);
+            let mut pipeline_guard = pipeline.write().await;
+            pipeline_guard.next_hop_stream = Some(Arc::new(Mutex::new(stream)));
+            pipeline_guard.next_hop_connected = true;
+            Ok(())
+        }
+        Err(e) => {
+            error!("Failed to connect to next_hop {}: {}", next_hop.worker_id, e);
+            let mut pipeline_guard = pipeline.write().await;
+            pipeline_guard.next_hop_connected = false;
+            Err(e.into())
+        }
+    }
 }
