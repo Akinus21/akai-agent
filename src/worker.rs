@@ -396,6 +396,49 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                     };
 
                     match msg {
+                        HubMessage::HeartbeatForward { pipeline } => {
+                            info!("Received heartbeat forward from hub, {} workers in pipeline", pipeline.workers.len());
+                            
+                            let my_id = &config.worker_id;
+                            if let Some(my_worker) = pipeline.workers.iter().find(|w| &w.worker_id == my_id) {
+                                if let Some(ref hop) = my_worker.next_hop {
+                                    let addr = format!("{}:{}", hop.host, hop.port);
+                                    info!("Forwarding heartbeat to next hop: {} at {}", hop.worker_id, addr);
+                                    match tokio::net::TcpStream::connect(&addr).await {
+                                        Ok(mut forward_stream) => {
+                                            let msg = HubMessage::HeartbeatForward { pipeline };
+                                            let data = serde_json::to_vec(&msg).unwrap();
+                                            forward_stream.write_all(&data).await.ok();
+                                            info!("Heartbeat forwarded to {}", hop.worker_id);
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to forward heartbeat to {}: {}", hop.worker_id, e);
+                                        }
+                                    }
+                                } else {
+                                    info!("This is the last worker in pipeline, sending heartbeat back to hub");
+                                    let hub_port = std::env::var("HUB_PORT").unwrap_or_else(|_| "50051".to_string());
+                                    let hub_addr = format!("{}:{}", config.hub_addr.split(':').next().unwrap_or("127.0.0.1"), hub_port);
+                                    if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
+                                        let hb = WorkerHeartbeat {
+                                            worker_id: config.worker_id.clone(),
+                                            load: 0.0,
+                                            layer_offset: config.layer_offset,
+                                            num_layers: config.num_layers,
+                                            has_gpu: config.has_gpu,
+                                            vram_gb: config.vram_gb,
+                                            active: true,
+                                            last_hop_connected: my_worker.last_hop.is_some(),
+                                            next_hop_connected: false,
+                                        };
+                                        let msg = HubMessage::Heartbeat(hb);
+                                        let data = serde_json::to_vec(&msg).unwrap();
+                                        hub_stream.write_all(&data).await.ok();
+                                        info!("Sent cascade heartbeat back to hub");
+                                    }
+                                }
+                            }
+                        }
                         HubMessage::HeartbeatResponse(resp) => {
                             info!("Received heartbeat response: layers {} to {}, model={}, pipeline={}",
                                 resp.layer_offset, resp.num_layers, resp.model_name, resp.pipeline.is_some());
