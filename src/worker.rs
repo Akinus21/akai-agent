@@ -420,11 +420,12 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                     let hub_port = std::env::var("HUB_PORT").unwrap_or_else(|_| "50051".to_string());
                                     let hub_addr = format!("{}:{}", config.hub_addr.split(':').next().unwrap_or("127.0.0.1"), hub_port);
                                     if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
+                                        let pipeline_guard = pipeline.read().await;
                                         let hb = WorkerHeartbeat {
                                             worker_id: config.worker_id.clone(),
                                             load: 0.0,
-                                            layer_offset: config.layer_offset,
-                                            num_layers: config.num_layers,
+                                            layer_offset: pipeline_guard.layer_offset,
+                                            num_layers: pipeline_guard.num_layers,
                                             has_gpu: config.has_gpu,
                                             vram_gb: config.vram_gb,
                                             active: true,
