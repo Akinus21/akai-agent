@@ -399,14 +399,15 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
                             info!("Received heartbeat forward from hub, {} workers in pipeline", pipeline_info.workers.len());
                             
+                            let pipeline_owned = pipeline_info.clone();
                             let my_id = &config.worker_id;
-                            if let Some(my_worker) = pipeline_info.workers.iter().find(|w| &w.worker_id == my_id) {
+                            if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| &w.worker_id == my_id) {
                                 if let Some(ref hop) = my_worker.next_hop {
                                     let addr = format!("{}:{}", hop.host, hop.port);
                                     info!("Forwarding heartbeat to next hop: {} at {}", hop.worker_id, addr);
                                     match tokio::net::TcpStream::connect(&addr).await {
                                         Ok(mut forward_stream) => {
-                                            let msg = HubMessage::HeartbeatForward { pipeline: pipeline_info };
+                                            let msg = HubMessage::HeartbeatForward { pipeline: pipeline_owned };
                                             let data = serde_json::to_vec(&msg).unwrap();
                                             forward_stream.write_all(&data).await.ok();
                                             info!("Heartbeat forwarded to {}", hop.worker_id);
