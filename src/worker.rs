@@ -432,7 +432,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                             info!("Received pipeline update with {} workers", pl.workers.len());
                             let mut pipeline_guard = pipeline.write().await;
                             
-                            for w în &pl.workers {
+                            for w in &pl.workers {
                                 if w.worker_id == config.worker_id {
                                     pipeline_guard.last_hop = w.last_hop.clone();
                                     pipeline_guard.next_hop = w.next_hop.clone();
