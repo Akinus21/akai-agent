@@ -35,6 +35,8 @@ pub enum HubMessage {
     Register(WorkerInfo),
     #[serde(rename = "heartbeat")]
     Heartbeat(WorkerHeartbeat),
+    #[serde(rename = "heartbeat_forward")]
+    HeartbeatForward { pipeline: PipelineInfo },
     #[serde(rename = "inference_request")]
     InferenceRequest(InferenceRequest),
     #[serde(rename = "inference_response")]
