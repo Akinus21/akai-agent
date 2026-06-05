@@ -33,16 +33,18 @@ pub struct WorkerInfo {
 pub enum HubMessage {
     #[serde(rename = "register")]
     Register(WorkerInfo),
+    #[serde(rename = "inference_request")]
+    InferenceRequest(InferenceRequest),
+    #[serde(rename = "inference_response")]
+    InferenceResponse(InferenceResponse),
+    #[serde(rename = "inference_forward")]
+    InferenceForward(InferenceForward),
     #[serde(rename = "heartbeat")]
     Heartbeat(WorkerHeartbeat),
     #[serde(rename = "heartbeat_response")]
     HeartbeatResponse(HeartbeatResponse),
     #[serde(rename = "heartbeat_forward")]
     HeartbeatForward { pipeline: PipelineInfo },
-    #[serde(rename = "inference_request")]
-    InferenceRequest(InferenceRequest),
-    #[serde(rename = "inference_response")]
-    InferenceResponse(InferenceResponse),
     #[serde(rename = "pipeline_info")]
     PipelineInfo(PipelineInfo),
     #[serde(rename = "error")]
@@ -102,6 +104,14 @@ pub struct InferenceResponse {
     pub prompt_tokens: u64,
     #[serde(default)]
     pub completion_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceForward {
+    pub id: String,
+    pub from_worker: String,
+    pub to_worker: String,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -667,6 +677,87 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                             let data = serde_json::to_vec(&msg).unwrap();
                                             stream.write_all(&data).await?;
                                             info!("Sent inference response {} back to hub", req.id);
+                                        }
+                                        HubMessage::InferenceForward(fwd) => {
+                                            info!("Received inference forward from {} ({} bytes), target={}",
+                                                fwd.from_worker, fwd.data.len(), fwd.to_worker);
+
+                                            // Check if we are the target
+                                            if fwd.to_worker == config.worker_id {
+                                                // We are the target - process our layers
+                                                // For now, if we have llama-server running, use it
+                                                // If is_last, send InferenceResponse back to hub
+                                                // If not is_last, forward to next worker
+                                                let pipeline_guard = pipeline.read().await;
+                                                if pipeline_guard.is_last {
+                                                    // Last worker - run inference and return result to hub
+                                                    drop(pipeline_guard);
+                                                    let client = Client::new();
+                                                    let llm_url = format!("http://127.0.0.1:{}/v1/chat/completions", config.llama_port);
+                                                    let body = serde_json::json!({
+                                                        "model": "local",
+                                                        "messages": [{"role": "user", "content": "[forwarded inference data]"}],
+                                                        "max_tokens": 128,
+                                                        "temperature": 0.7,
+                                                        "stream": false
+                                                    });
+                                                    match client.post(&llm_url).json(&body).timeout(std::time::Duration::from_secs(120)).send().await {
+                                                        Ok(resp) => {
+                                                            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                                                let content = json["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+                                                                let pt = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+                                                                let ct = json["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+                                                                let resp_msg = InferenceResponse {
+                                                                    id: fwd.id.clone(),
+                                                                    token: None,
+                                                                    hidden_states: None,
+                                                                    is_done: true,
+                                                                    text: Some(content),
+                                                                    prompt_tokens: pt,
+                                                                    completion_tokens: ct,
+                                                                };
+                                                                let msg = HubMessage::InferenceResponse(resp_msg);
+                                                                let data = serde_json::to_vec(&msg).unwrap();
+                                                                stream.write_all(&data).await?;
+                                                                info!("Last worker sent inference response {} to hub", fwd.id);
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            error!("LLM request failed in forward: {}", e);
+                                                            let resp_msg = InferenceResponse {
+                                                                id: fwd.id.clone(),
+                                                                token: None,
+                                                                hidden_states: None,
+                                                                is_done: true,
+                                                                text: Some(format!("Error: {}", e)),
+                                                                prompt_tokens: 0,
+                                                                completion_tokens: 0,
+                                                            };
+                                                            let msg = HubMessage::InferenceResponse(resp_msg);
+                                                            let data = serde_json::to_vec(&msg).unwrap();
+                                                            stream.write_all(&data).await?;
+                                                        }
+                                                    }
+                                                } else {
+                                                    // Not last worker - process our layers and forward to next
+                                                    drop(pipeline_guard);
+                                                    let pipeline_guard = pipeline.read().await;
+                                                    if let Some(ref next_hop) = pipeline_guard.next_hop {
+                                                        let forward = InferenceForward {
+                                                            id: fwd.id.clone(),
+                                                            from_worker: config.worker_id.clone(),
+                                                            to_worker: next_hop.worker_id.clone(),
+                                                            data: fwd.data.clone(),
+                                                        };
+                                                        let msg = HubMessage::InferenceForward(forward);
+                                                        let data = serde_json::to_vec(&msg).unwrap();
+                                                        stream.write_all(&data).await?;
+                                                        info!("Forwarded inference {} to next worker via hub", fwd.id);
+                                                    } else {
+                                                        warn!("No next_hop configured, cannot forward inference");
+                                                    }
+                                                }
+                                            }
                                         }
                                         HubMessage::Error { code, message } => {
                                             error!("Hub error {}: {}", code, message);

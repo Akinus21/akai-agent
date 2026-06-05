@@ -19,6 +19,8 @@ const NEW_CONN: u8 = 0x02;
 const CLOSE: u8 = 0x03;
 const PING: u8 = 0x04;
 const PONG: u8 = 0x05;
+const PEER_CONNECT: u8 = 0x06;
+const PEER_ACK: u8 = 0x07;
 
 struct Frame {
     msg_type: u8,
@@ -56,12 +58,39 @@ pub struct TunnelClient {
     server_port: u16,
     worker_id: String,
     rpc_port: u16,
+    p2p_port: u16,
     ca_cert_pem: Vec<u8>,
     client_cert_pem: Vec<u8>,
     client_key_pem: Vec<u8>,
     conns: Arc<Mutex<HashMap<u32, ConnState>>>,
     connected: Arc<AtomicBool>,
 }
+
+impl TunnelClient {
+    pub fn new(
+        server_host: &str,
+        server_port: u16,
+        worker_id: &str,
+        rpc_port: u16,
+        p2p_port: u16,
+        ca_cert_pem: Vec<u8>,
+        client_cert_pem: Vec<u8>,
+        client_key_pem: Vec<u8>,
+        connected: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            server_host: server_host.to_string(),
+            server_port,
+            worker_id: worker_id.to_string(),
+            rpc_port,
+            p2p_port,
+            ca_cert_pem,
+            client_cert_pem,
+            client_key_pem,
+            conns: Arc::new(Mutex::new(HashMap::new())),
+            connected,
+        }
+    }
 
 impl TunnelClient {
     pub fn new(
@@ -169,12 +198,13 @@ impl TunnelClient {
         let (mut reader, mut writer) = tokio::io::split(tls);
 
         let wid_bytes = worker_id.as_bytes();
-        let mut handshake = Vec::with_capacity(8 + 1 + 2 + wid_bytes.len() + 2);
+        let mut handshake = Vec::with_capacity(8 + 1 + 2 + wid_bytes.len() + 2 + 2);
         handshake.extend_from_slice(MAGIC);
         handshake.push(V1);
         handshake.extend_from_slice(&(wid_bytes.len() as u16).to_be_bytes());
         handshake.extend_from_slice(wid_bytes);
         handshake.extend_from_slice(&rpc_port.to_be_bytes());
+        handshake.extend_from_slice(&self.p2p_port.to_be_bytes());
 
         writer.write_all(&handshake).await?;
         writer.flush().await?;
@@ -203,8 +233,9 @@ impl TunnelClient {
                 let frame = read_frame(&mut reader).await?;
 
                 match frame.msg_type {
-                    NEW_CONN if frame.payload.len() >= 4 => {
+                    NEW_CONN if frame.payload.len() >= 6 => {
                         let conn_id = u32::from_be_bytes(frame.payload[..4].try_into()?);
+                        let local_port = u16::from_be_bytes(frame.payload[4..6].try_into()?);
                         let w = writer.clone();
                         let c = conns.clone();
 
@@ -212,10 +243,10 @@ impl TunnelClient {
                         conns.lock().await.insert(conn_id, ConnState { write_tx: write_tx.clone() });
 
                         let active = conns.lock().await.len();
-                        println!("job received: inference conn #{conn_id} (active: {active})");
+                        println!("job received: inference conn #{} on port {} (active: {})", conn_id, local_port, active);
 
                         tokio::spawn(async move {
-                            if let Err(e) = serve_conn(conn_id, rpc_port, w, c, write_rx).await {
+                            if let Err(e) = serve_conn(conn_id, local_port, w, c, write_rx).await {
                                 tracing::debug!("conn {} ended: {e}", conn_id);
                             }
                         });
@@ -253,13 +284,13 @@ impl TunnelClient {
 
 async fn serve_conn(
     conn_id: u32,
-    rpc_port: u16,
+    local_port: u16,
     tunnel_writer: Arc<Mutex<TlsWriteHalf>>,
     conns: Arc<Mutex<HashMap<u32, ConnState>>>,
     mut write_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) -> Result<()> {
-    let local = TcpStream::connect(format!("127.0.0.1:{}", rpc_port)).await
-        .context("connect to local rpc-server failed")?;
+    let local = TcpStream::connect(format!("127.0.0.1:{}", local_port)).await
+        .context(format!("connect to local port {} failed", local_port))?;
     let (mut rpc_reader, mut rpc_writer) = local.into_split();
 
     let conn_id_bytes = conn_id.to_be_bytes();
