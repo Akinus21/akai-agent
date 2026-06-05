@@ -503,9 +503,9 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                             .context("Failed to download rpc-server")?;
                                                     }
 
-                                                    let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port)?;
+                                                    let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port + 1)?;
                                                     rpc_child.lock().await.replace(child);
-                                                    info!("rpc-server started on port {}", config.rpc_port);
+                                                    info!("rpc-server started on port {}", config.rpc_port + 1);
                                                 }
                                             }
                                         }
