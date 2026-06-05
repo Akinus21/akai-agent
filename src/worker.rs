@@ -752,15 +752,15 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                         }
                     }
                 }
-                Err(e) => {
-                    error!("Failed to connect to hub: {}", e);
-                }
+            }
+            Err(e) => {
+                error!("Failed to connect to hub: {}", e);
+            }
             }
 
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
-}
 
 async fn run_inbound_listener(
     port: u16,
@@ -789,7 +789,7 @@ async fn run_inbound_listener(
 
 async fn handle_inbound_connection(
     mut stream: TcpStream,
-    pipeline: Arc<RwLock<PipelineState>>,
+    _pipeline: Arc<RwLock<PipelineState>>,
 ) -> Result<()> {
     let mut buf = vec![0u8; 65536];
     let n = stream.read(&mut buf).await?;
