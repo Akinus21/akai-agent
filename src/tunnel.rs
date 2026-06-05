@@ -92,30 +92,6 @@ impl TunnelClient {
         }
     }
 
-impl TunnelClient {
-    pub fn new(
-        server_host: &str,
-        server_port: u16,
-        worker_id: &str,
-        rpc_port: u16,
-        ca_cert_pem: Vec<u8>,
-        client_cert_pem: Vec<u8>,
-        client_key_pem: Vec<u8>,
-        connected: Arc<AtomicBool>,
-    ) -> Self {
-        Self {
-            server_host: server_host.to_string(),
-            server_port,
-            worker_id: worker_id.to_string(),
-            rpc_port,
-            ca_cert_pem,
-            client_cert_pem,
-            client_key_pem,
-            conns: Arc::new(Mutex::new(HashMap::new())),
-            connected,
-        }
-    }
-
     pub async fn run(&self) -> Result<()> {
         let connector = self.build_tls_connector()
             .map_err(|e| anyhow::anyhow!("TLS config failed: {e}"))?;
