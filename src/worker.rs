@@ -86,6 +86,8 @@ pub struct InferenceRequest {
     pub is_last: bool,
     pub max_new_tokens: usize,
     pub temperature: f32,
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +96,12 @@ pub struct InferenceResponse {
     pub token: Option<i64>,
     pub hidden_states: Option<Vec<f32>>,
     pub is_done: bool,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -509,6 +517,78 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                 }
                                             }
                                         }
+                                        HubMessage::InferenceRequest(req) => {
+                                            info!("Received inference request {} from hub", req.id);
+                                            let prompt = req.prompt.unwrap_or_default();
+                                            let max_tokens = req.max_new_tokens;
+                                            let temperature = req.temperature;
+
+                                            let client = Client::new();
+                                            let llm_url = format!("http://127.0.0.1:{}/v1/chat/completions", 8080);
+
+                                            let body = serde_json::json!({
+                                                "model": "local",
+                                                "messages": [{"role": "user", "content": prompt}],
+                                                "max_tokens": max_tokens,
+                                                "temperature": temperature,
+                                                "stream": false
+                                            });
+
+                                            let resp_msg = match client.post(&llm_url)
+                                                .json(&body)
+                                                .timeout(std::time::Duration::from_secs(120))
+                                                .send().await
+                                            {
+                                                Ok(resp) => {
+                                                    match resp.json::<serde_json::Value>().await {
+                                                        Ok(json) => {
+                                                            let content = json["choices"][0]["message"]["content"]
+                                                                .as_str().unwrap_or("").to_string();
+                                                            let prompt_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+                                                            let completion_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+                                                            InferenceResponse {
+                                                                id: req.id.clone(),
+                                                                token: None,
+                                                                hidden_states: None,
+                                                                is_done: true,
+                                                                text: Some(content),
+                                                                prompt_tokens,
+                                                                completion_tokens,
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            error!("Failed to parse LLM response: {}", e);
+                                                            InferenceResponse {
+                                                                id: req.id.clone(),
+                                                                token: None,
+                                                                hidden_states: None,
+                                                                is_done: true,
+                                                                text: Some(format!("Error parsing LLM response: {}", e)),
+                                                                prompt_tokens: 0,
+                                                                completion_tokens: 0,
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    error!("LLM request failed: {}", e);
+                                                    InferenceResponse {
+                                                        id: req.id.clone(),
+                                                        token: None,
+                                                        hidden_states: None,
+                                                        is_done: true,
+                                                        text: Some(format!("Error: LLM server not available - {}", e)),
+                                                        prompt_tokens: 0,
+                                                        completion_tokens: 0,
+                                                    }
+                                                }
+                                            };
+
+                                            let msg = HubMessage::InferenceResponse(resp_msg);
+                                            let data = serde_json::to_vec(&msg).unwrap();
+                                            stream.write_all(&data).await?;
+                                            info!("Sent inference response {} back to hub", req.id);
+                                        }
                                         HubMessage::Error { code, message } => {
                                             error!("Hub error {}: {}", code, message);
                                         }
@@ -522,13 +602,13 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                         }
                     }
                 }
+                Err(e) => {
+                    error!("Failed to connect to hub: {}", e);
+                }
             }
-            Err(e) => {
-                error!("Failed to connect to hub: {}", e);
-            }
-        }
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
     }
 }
 
@@ -605,6 +685,9 @@ async fn handle_inbound_connection(
                             token: None,
                             hidden_states: None,
                             is_done: true,
+                            text: Some(content),
+                            prompt_tokens: json["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
+                            completion_tokens: json["usage"]["completion_tokens"].as_u64().unwrap_or(0),
                         };
                         let msg = HubMessage::InferenceResponse(resp);
                         let data = serde_json::to_vec(&msg)?;
