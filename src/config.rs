@@ -11,6 +11,7 @@ pub struct Config {
     pub wg_ip:       String,
     pub wg_peer_id:  String,
     pub rpc_port:    u16,
+    pub llama_port:   u16,
     pub gpu:         bool,
     pub vram_gb:     f64,
     pub rpc_binary:  String,

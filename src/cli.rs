@@ -91,6 +91,7 @@ mod handlers {
             wg_ip:       String::new(),
             wg_peer_id:  String::new(),
             rpc_port:    50052,
+            llama_port:  8081,
             gpu:         gpu_info.has_gpu,
             vram_gb:     gpu_info.vram_gb,
             gpu_backend: gpu_info.backend.to_string(),
@@ -165,6 +166,7 @@ mod handlers {
             has_gpu: gpu_info.has_gpu,
             vram_gb: gpu_info.vram_gb as f32,
             rpc_port: cfg.rpc_port,
+            llama_port: cfg.llama_port,
         }).await
     }
 }

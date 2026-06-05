@@ -300,6 +300,7 @@ pub struct HubWorkerConfig {
     pub has_gpu: bool,
     pub vram_gb: f32,
     pub rpc_port: u16,
+    pub llama_port: u16,
 }
 
 pub struct PipelineState {
@@ -313,6 +314,9 @@ pub struct PipelineState {
     pub is_first: bool,
     pub is_last: bool,
     pub next_hop_stream: Option<Arc<Mutex<TcpStream>>>,
+    pub model_name: String,
+    pub model_url: String,
+    pub llama_server_started: bool,
 }
 
 impl PipelineState {
@@ -328,6 +332,9 @@ impl PipelineState {
             is_first: false,
             is_last: false,
             next_hop_stream: None,
+            model_name: String::new(),
+            model_url: String::new(),
+            llama_server_started: false,
         }
     }
 }
@@ -338,9 +345,11 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
     info!("  Worker ID: {}", config.worker_id);
     info!("  GPU: {}, VRAM: {:.1} GB", config.has_gpu, config.vram_gb);
     info!("  RPC port: {}", config.rpc_port);
+    info!("  LLM port: {}", config.llama_port);
 
     let pipeline: Arc<RwLock<PipelineState>> = Arc::new(RwLock::new(PipelineState::new(config.worker_id.clone())));
     let rpc_child: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
+    let llama_child: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
 
     // Spawn inbound connection listener for last_hop (weaker workers) to connect to us
     let inbound_port = config.rpc_port;
@@ -354,10 +363,15 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
 
     // Handle Ctrl+C gracefully
     let rpc_child_clone = rpc_child.clone();
+    let llama_child_clone = llama_child.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         eprintln!("Shutting down worker...");
         let opt_child = rpc_child_clone.lock().await.take();
+        if let Some(mut child) = opt_child {
+            child.kill().ok();
+        }
+        let opt_child = llama_child_clone.lock().await.take();
         if let Some(mut child) = opt_child {
             child.kill().ok();
         }
@@ -489,6 +503,70 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                 pipeline_guard.num_layers = resp.num_layers;
                                             }
 
+                                            let model_changed = !resp.model_name.is_empty() && resp.model_name != pipeline_guard.model_name;
+                                            if model_changed {
+                                                pipeline_guard.model_name = resp.model_name.clone();
+                                                pipeline_guard.model_url = resp.model_url.clone();
+                                            }
+
+                                            if let Some(pl) = resp.pipeline {
+                                                for w in &pl.workers {
+                                                    if w.worker_id == config.worker_id {
+                                                        pipeline_guard.last_hop = w.last_hop.clone();
+                                                        pipeline_guard.next_hop = w.next_hop.clone();
+                                                        pipeline_guard.is_first = w.is_first;
+                                                        pipeline_guard.is_last = w.is_last;
+                                                        break;
+                                                    }
+                                                }
+                                                
+                                                if pipeline_guard.num_layers > 0 && !pipeline_guard.llama_server_started {
+                                                    info!("Spawning rpc-server for layers {} to {}...",
+                                                        pipeline_guard.layer_offset, pipeline_guard.layer_offset + pipeline_guard.num_layers);
+
+                                                    let rpc_path = crate::rpc::rpc_binary_path();
+                                                    if !rpc_path.exists() {
+                                                        info!("Downloading rpc-server...");
+                                                        crate::rpc::ensure_rpc_server().await
+                                                            .context("Failed to download rpc-server")?;
+                                                    }
+
+                                                    let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port + 1)?;
+                                                    rpc_child.lock().await.replace(child);
+                                                    info!("rpc-server started on port {}", config.rpc_port + 1);
+
+                                                    // Also start llama-server for local inference
+                                                    if !pipeline_guard.model_url.is_empty() && pipeline_guard.is_first {
+                                                        info!("First worker: starting llama-server for inference on port {}", config.llama_port);
+                                                        let llama_path = crate::rpc::llama_server_path();
+                                                        if !llama_path.exists() {
+                                                            info!("Downloading llama-server...");
+                                                            crate::rpc::ensure_llama_server().await
+                                                                .context("Failed to download llama-server")?;
+                                                        }
+                                                        // TODO: download model from model_url
+                                                        // For now, the model must be pre-downloaded
+                                                        let model_path = crate::config::data_dir().join("model.gguf");
+                                                        if model_path.exists() {
+                                                            let ngl = if config.has_gpu { -1 } else { 0 };
+                                                            let mut llama_cmd = crate::rpc::spawn_llama_server(
+                                                                &llama_path,
+                                                                &model_path.to_string_lossy(),
+                                                                ngl,
+                                                                config.llama_port,
+                                                            )?;
+                                                            info!("llama-server started on port {}", config.llama_port);
+                                                            llama_child.lock().await.replace(llama_cmd);
+                                                            pipeline_guard.llama_server_started = true;
+                                                        } else {
+                                                            warn!("Model file not found at {:?}, cannot start llama-server yet", model_path);
+                                                            info!("Download model with: curl -L -o {} <model_url>", model_path.display());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                             if let Some(pl) = resp.pipeline {
                                                 for w in &pl.workers {
                                                     if w.worker_id == config.worker_id {
@@ -522,9 +600,10 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                             let prompt = req.prompt.unwrap_or_default();
                                             let max_tokens = req.max_new_tokens;
                                             let temperature = req.temperature;
+                                            let llama_port = config.llama_port;
 
                                             let client = Client::new();
-                                            let llm_url = format!("http://127.0.0.1:{}/v1/chat/completions", 8080);
+                                            let llm_url = format!("http://127.0.0.1:{}/v1/chat/completions", llama_port);
 
                                             let body = serde_json::json!({
                                                 "model": "local",
