@@ -39,7 +39,6 @@ pub async fn run() -> anyhow::Result<()> {
 
 mod handlers {
     use anyhow::{Context, Result};
-    use std::fs;
     use crate::{config, gpu, worker};
 
     pub fn clean() -> Result<()> {
@@ -83,7 +82,7 @@ mod handlers {
             println!("  GPU:      CPU only");
         }
 
-        let mut cfg = config::Config {
+        let cfg = config::Config {
             queue_url:   String::new(),
             api_key:     String::new(),
             worker_id:   worker_id.clone(),
