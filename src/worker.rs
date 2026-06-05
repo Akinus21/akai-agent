@@ -257,6 +257,9 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                                             token: None,
                                             hidden_states: None,
                                             is_done: true,
+                                            text: Some(content),
+                                            prompt_tokens: 0,
+                                            completion_tokens: 0,
                                         };
                                         let msg = HubMessage::InferenceResponse(resp);
                                         let data = serde_json::to_vec(&msg)?;
@@ -268,6 +271,9 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                                             token: Some(0),
                                             hidden_states: None,
                                             is_done: true,
+                                            text: None,
+                                            prompt_tokens: 0,
+                                            completion_tokens: 0,
                                         };
                                         let msg = HubMessage::InferenceResponse(resp);
                                         let data = serde_json::to_vec(&msg)?;
@@ -281,6 +287,9 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                                         token: Some(0),
                                         hidden_states: None,
                                         is_done: true,
+                                        text: None,
+                                        prompt_tokens: 0,
+                                        completion_tokens: 0,
                                     };
                                     let msg = HubMessage::InferenceResponse(resp);
                                     let data = serde_json::to_vec(&msg)?;
