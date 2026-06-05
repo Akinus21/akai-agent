@@ -597,7 +597,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                         let bytes = resp.bytes().await;
                                                                         match bytes {
                                                                             Ok(bytes) => {
-                                                                                if let parent = model_path.parent() {
+                                                                                if let Some(parent) = model_path.parent() {
                                                                                     std::fs::create_dir_all(parent).ok();
                                                                                 }
                                                                                 match std::fs::write(&model_path, &bytes) {
