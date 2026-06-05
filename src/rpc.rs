@@ -509,6 +509,8 @@ pub async fn ensure_llama_server() -> Result<PathBuf> {
         let decoder = GzDecoder::new(bytes.as_ref());
         let mut archive = tar::Archive::new(decoder);
         let mut found = false;
+        let lib_dir = crate::config::data_dir().join("lib");
+        std::fs::create_dir_all(&lib_dir)?;
         for entry in archive.entries()? {
             let mut entry = entry?;
             let name = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
@@ -516,7 +518,14 @@ pub async fn ensure_llama_server() -> Result<PathBuf> {
                 let mut out = std::fs::File::create(dest)?;
                 std::io::copy(&mut entry, &mut out)?;
                 found = true;
-                break;
+            } else if name.ends_with(".so") || name.contains(".so.") {
+                let lib_name = entry.path().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).unwrap_or_default();
+                if !lib_name.is_empty() {
+                    let lib_dest = lib_dir.join(&lib_name);
+                    let mut out = std::fs::File::create(&lib_dest)?;
+                    std::io::copy(&mut entry, &mut out)?;
+                    println!("Extracted shared lib: {}", lib_name);
+                }
             }
         }
         if !found {
