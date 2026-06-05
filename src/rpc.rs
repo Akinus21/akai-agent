@@ -456,7 +456,10 @@ pub fn spawn_rpc_server(binary: &Path, port: u16) -> Result<std::process::Child>
 
 pub async fn ensure_llama_server() -> Result<PathBuf> {
     let path = llama_server_path();
-    if path.exists() {
+    let lib_dir = crate::config::data_dir().join("lib");
+    let needs_libs = !lib_dir.exists() || std::fs::read_dir(&lib_dir).map(|mut d| d.next().is_none()).unwrap_or(true);
+
+    if path.exists() && !needs_libs {
         return Ok(path);
     }
 

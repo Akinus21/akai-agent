@@ -469,13 +469,14 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
 
                                     match msg {
                                         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
-                                            info!("Received heartbeat forward from hub, {} workers in pipeline", pipeline_info.workers.len());
+                                            info!("[<- hub] HeartbeatForward: pipeline_id={}, {} workers, model={}", 
+                                                pipeline_info.pipeline_id, pipeline_info.workers.len(), pipeline_info.model_name);
                                             
                                             let pipeline_owned = pipeline_info.clone();
                                             let my_id = &config.worker_id;
                                             if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| &w.worker_id == my_id) {
                                                 if my_worker.is_first {
-                                                    info!("I am the first worker in pipeline, reporting status to hub via persistent connection");
+                                                    info!("[self] first worker in pipeline, sending Heartbeat back to hub");
                                                     let pipeline_guard = pipeline.read().await;
                                                     let hb = WorkerHeartbeat {
                                                         worker_id: config.worker_id.clone(),
@@ -492,9 +493,9 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                     let data = encode_msg(&msg);
                                                     let mut w = writer.lock().await;
                                                     w.write_all(&data).await.ok();
-                                                    info!("Sent heartbeat status to hub as first worker");
+                                                    info!("[-> hub] Heartbeat: layers {}-{}, active=true", pipeline_guard.layer_offset, pipeline_guard.layer_offset + pipeline_guard.num_layers);
                                                 } else if my_worker.is_last {
-                                                    info!("I am the last worker in pipeline, reporting status to hub via persistent connection");
+                                                    info!("[self] last worker in pipeline, sending Heartbeat back to hub");
                                                     let pipeline_guard = pipeline.read().await;
                                                     let hb = WorkerHeartbeat {
                                                         worker_id: config.worker_id.clone(),
@@ -511,7 +512,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                     let data = encode_msg(&msg);
                                                     let mut w = writer.lock().await;
                                                     w.write_all(&data).await.ok();
-                                                    info!("Sent heartbeat status to hub as last worker");
+                                                    info!("[-> hub] Heartbeat: layers {}-{}, active=true, last_hop=true", pipeline_guard.layer_offset, pipeline_guard.layer_offset + pipeline_guard.num_layers);
                                                 }
                                                 
                                                 if let Some(ref hop) = my_worker.next_hop {
@@ -519,24 +520,24 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                     let hop_host = hop.host.clone();
                                                     let hop_port = hop.port;
                                                     let addr = format!("{}:{}", hop_host, hop_port);
-                                                    info!("Forwarding heartbeat to next hop: {} at {}", hop_worker_id, addr);
+                                                    info!("[-> {}] Forwarding HeartbeatForward to next hop at {}", hop_worker_id, addr);
                                                     match tokio::net::TcpStream::connect(&addr).await {
                                                         Ok(mut forward_stream) => {
                                                             let msg = HubMessage::HeartbeatForward { pipeline: pipeline_owned };
                                                             let data = encode_msg(&msg);
                                                             forward_stream.write_all(&data).await.ok();
-                                                            info!("Heartbeat forwarded to {}", hop_worker_id);
+                                                            info!("[-> {}] HeartbeatForward sent", hop_worker_id);
                                                         }
                                                         Err(e) => {
-                                                            warn!("Failed to forward heartbeat to {}: {}", hop_worker_id, e);
+                                                            warn!("[-> {}] HeartbeatForward FAILED: {}", hop_worker_id, e);
                                                         }
                                                     }
                                                 }
                                             }
                                         }
                                         HubMessage::HeartbeatResponse(resp) => {
-                                            info!("Received heartbeat response: layers {} to {}, model={}, pipeline={}",
-                                                resp.layer_offset, resp.num_layers, resp.model_name, resp.pipeline.is_some());
+                                            info!("[<- hub] HeartbeatResponse: layers {}-{}, model={}, pipeline={}",
+                                                resp.layer_offset, resp.layer_offset + resp.num_layers, resp.model_name, resp.pipeline.is_some());
 
                                             let mut pipeline_guard = pipeline.write().await;
                                             
@@ -650,7 +651,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                             }
                                         }
                                         HubMessage::InferenceRequest(req) => {
-                                            info!("Received inference request {} from hub", req.id);
+                                            info!("[<- hub] InferenceRequest: id={}, max_tokens={}", req.id, req.max_new_tokens);
                                             let prompt = req.prompt.unwrap_or_default();
                                             let max_tokens = req.max_new_tokens;
                                             let temperature = req.temperature;
@@ -721,11 +722,11 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                             let data = encode_msg(&msg);
                                             let mut w = writer.lock().await;
                                             w.write_all(&data).await?;
-                                            info!("Sent inference response {} back to hub", req.id);
+                                            info!("[-> hub] InferenceResponse: id={}, done={}", req.id, true);
                                         }
                                         HubMessage::InferenceForward(fwd) => {
-                                            info!("Received inference forward from {} ({} bytes), target={}",
-                                                fwd.from_worker, fwd.data.len(), fwd.to_worker);
+                                            info!("[<- hub] InferenceForward: from={}, target={}, {} bytes",
+                                                fwd.from_worker, fwd.to_worker, fwd.data.len());
 
                                             // Check if we are the target
                                             if fwd.to_worker == config.worker_id {
@@ -761,11 +762,11 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                     prompt_tokens: pt,
                                                                     completion_tokens: ct,
                                                                 };
-                                                                let msg = HubMessage::InferenceResponse(resp_msg);
+                                                                 let msg = HubMessage::InferenceResponse(resp_msg);
                                                                  let data = encode_msg(&msg);
                                                                  let mut w = writer.lock().await;
                                                                  w.write_all(&data).await?;
-                                                                 info!("Last worker sent inference response {} to hub", fwd.id);
+                                                                 info!("[-> hub] InferenceResponse: id={} (last worker)", fwd.id);
                                                             }
                                                         }
                                                         Err(e) => {
@@ -800,7 +801,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                         let data = encode_msg(&msg);
                                                         let mut w = writer.lock().await;
                                                         w.write_all(&data).await?;
-                                                        info!("Forwarded inference {} to next worker via hub", fwd.id);
+                                                        info!("[-> hub] InferenceForward: -> next worker {}", next_hop.worker_id);
                                                     } else {
                                                         warn!("No next_hop configured, cannot forward inference");
                                                     }
@@ -815,8 +816,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                 } // end while let Some(pos)
                                 }
                                 Err(e) => {
-                                    error!("Read error: {}", e);
-                                    error!("Read error: {}", e);
+                                    error!("[hub] Read error: {}", e);
                                 }
                             }
                         }
