@@ -576,35 +576,6 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                 }
                                             }
                                         }
-
-                                            if let Some(pl) = resp.pipeline {
-                                                for w in &pl.workers {
-                                                    if w.worker_id == config.worker_id {
-                                                        pipeline_guard.last_hop = w.last_hop.clone();
-                                                        pipeline_guard.next_hop = w.next_hop.clone();
-                                                        pipeline_guard.is_first = w.is_first;
-                                                        pipeline_guard.is_last = w.is_last;
-                                                        break;
-                                                    }
-                                                }
-                                                
-                                                if pipeline_guard.num_layers > 0 {
-                                                    info!("Spawning rpc-server for layers {} to {}...",
-                                                        pipeline_guard.layer_offset, pipeline_guard.layer_offset + pipeline_guard.num_layers);
-
-                                                    let rpc_path = crate::rpc::rpc_binary_path();
-                                                    if !rpc_path.exists() {
-                                                        info!("Downloading rpc-server...");
-                                                        crate::rpc::ensure_rpc_server().await
-                                                            .context("Failed to download rpc-server")?;
-                                                    }
-
-                                                    let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port + 1)?;
-                                                    rpc_child.lock().await.replace(child);
-                                                    info!("rpc-server started on port {}", config.rpc_port + 1);
-                                                }
-                                            }
-                                        }
                                         HubMessage::InferenceRequest(req) => {
                                             info!("Received inference request {} from hub", req.id);
                                             let prompt = req.prompt.unwrap_or_default();
