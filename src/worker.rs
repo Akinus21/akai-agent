@@ -343,6 +343,7 @@ pub struct PipelineState {
     pub model_name: String,
     pub model_url: String,
     pub llama_server_started: bool,
+    pub rpc_server_started: bool,
 }
 
 impl PipelineState {
@@ -361,6 +362,7 @@ impl PipelineState {
             model_name: String::new(),
             model_url: String::new(),
             llama_server_started: false,
+            rpc_server_started: false,
         }
     }
 }
@@ -543,7 +545,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                 pipeline_guard.num_layers = resp.num_layers;
                                             }
 
-                                            let model_changed = !resp.model_name.is_empty() && resp.model_name != pipeline_guard.model_name;
+                                            let model_changed = !resp.model_name.is_empty() && (resp.model_name != pipeline_guard.model_name || resp.model_url != pipeline_guard.model_url);
                                             if model_changed {
                                                 pipeline_guard.model_name = resp.model_name.clone();
                                                 pipeline_guard.model_url = resp.model_url.clone();
@@ -560,32 +562,43 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                     }
                                                 }
                                                 
-                                                if pipeline_guard.num_layers > 0 && !pipeline_guard.llama_server_started {
-                                                    info!("Spawning rpc-server for layers {} to {}...",
-                                                        pipeline_guard.layer_offset, pipeline_guard.layer_offset + pipeline_guard.num_layers);
+                                                if pipeline_guard.num_layers > 0 {
+                                                    // Spawn rpc-server if not already running
+                                                    if !pipeline_guard.rpc_server_started {
+                                                        info!("Spawning rpc-server for layers {} to {}...",
+                                                            pipeline_guard.layer_offset, pipeline_guard.layer_offset + pipeline_guard.num_layers);
 
-                                                    let rpc_path = crate::rpc::rpc_binary_path();
-                                                    if !rpc_path.exists() {
-                                                        info!("Downloading rpc-server...");
-                                                        crate::rpc::ensure_rpc_server().await
-                                                            .context("Failed to download rpc-server")?;
+                                                        let rpc_path = crate::rpc::rpc_binary_path();
+                                                        if !rpc_path.exists() {
+                                                            info!("Downloading rpc-server...");
+                                                            crate::rpc::ensure_rpc_server().await
+                                                                .context("Failed to download rpc-server")?;
+                                                        }
+
+                                                        let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port + 1)?;
+                                                        rpc_child.lock().await.replace(child);
+                                                        info!("rpc-server started on port {}", config.rpc_port + 1);
+                                                        pipeline_guard.rpc_server_started = true;
                                                     }
 
-                                                    let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port + 1)?;
-                                                    rpc_child.lock().await.replace(child);
-                                                    info!("rpc-server started on port {}", config.rpc_port + 1);
-
-                                                    // Also start llama-server for local inference
-                                                    if !pipeline_guard.model_url.is_empty() && pipeline_guard.is_first {
-                                                        info!("First worker: starting llama-server for inference on port {}", config.llama_port);
-                                                        let llama_path = crate::rpc::llama_server_path();
-                                                        if !llama_path.exists() {
-                                                            info!("Downloading llama-server...");
-                                                            crate::rpc::ensure_llama_server().await
-                                                                .context("Failed to download llama-server")?;
-                                                        }
+                                                    // First worker: download model and start llama-server
+                                                    if pipeline_guard.is_first && !pipeline_guard.model_url.is_empty() {
                                                         let model_path = crate::config::data_dir().join("model.gguf");
-                                                        if !model_path.exists() && !pipeline_guard.model_url.is_empty() {
+
+                                                        if model_changed || !model_path.exists() {
+                                                            // Kill existing llama-server if running
+                                                            if pipeline_guard.llama_server_started {
+                                                                info!("Model changed, stopping llama-server");
+                                                                if let Some(mut old) = llama_child.lock().await.take() {
+                                                                    old.kill().ok();
+                                                                }
+                                                                pipeline_guard.llama_server_started = false;
+                                                            }
+                                                            // Delete old model and download new one
+                                                            if model_path.exists() {
+                                                                info!("Deleting old model file");
+                                                                std::fs::remove_file(&model_path).ok();
+                                                            }
                                                             info!("Downloading model from {}...", pipeline_guard.model_url);
                                                             let client = Client::new();
                                                             match client.get(&pipeline_guard.model_url)
@@ -594,8 +607,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                             {
                                                                 Ok(resp) => {
                                                                     if resp.status().is_success() {
-                                                                        let bytes = resp.bytes().await;
-                                                                        match bytes {
+                                                                        match resp.bytes().await {
                                                                             Ok(bytes) => {
                                                                                 if let Some(parent) = model_path.parent() {
                                                                                     std::fs::create_dir_all(parent).ok();
@@ -614,7 +626,14 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                 Err(e) => error!("Model download request failed: {}", e),
                                                             }
                                                         }
-                                                        if model_path.exists() {
+                                                        // Start llama-server if model exists and not already running
+                                                        if model_path.exists() && !pipeline_guard.llama_server_started {
+                                                            let llama_path = crate::rpc::llama_server_path();
+                                                            if !llama_path.exists() {
+                                                                info!("Downloading llama-server...");
+                                                                crate::rpc::ensure_llama_server().await
+                                                                    .context("Failed to download llama-server")?;
+                                                            }
                                                             let ngl = if config.has_gpu { -1 } else { 0 };
                                                             let llama_cmd = crate::rpc::spawn_llama_server(
                                                                 &llama_path,
@@ -625,9 +644,6 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                             info!("llama-server started on port {}", config.llama_port);
                                                             llama_child.lock().await.replace(llama_cmd);
                                                             pipeline_guard.llama_server_started = true;
-                                                        } else {
-                                                            warn!("Model file not found at {:?}, cannot start llama-server yet", model_path);
-                                                            info!("Download model with: curl -L -o {} <model_url>", model_path.display());
                                                         }
                                                     }
                                                 }
