@@ -407,8 +407,12 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
     // Persistent connection to hub
     loop {
         match tokio::net::TcpStream::connect(&config.hub_addr).await {
-            Ok(mut stream) => {
+            Ok(stream) => {
                 info!("Connected to hub, registering...");
+
+                let (reader, writer) = stream.into_split();
+                let mut reader = reader;
+                let writer = Arc::new(Mutex::new(writer));
 
                 // Register with hub
                 let worker_info = WorkerInfo {
@@ -426,14 +430,17 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                 let register = HubMessage::Register(worker_info);
                 let mut data = serde_json::to_vec(&register)?;
                 data.push(b'\n');
-                stream.write_all(&data).await?;
+                {
+                    let mut w = writer.lock().await;
+                    w.write_all(&data).await?;
+                }
                 info!("Registered with hub, maintaining persistent connection...");
 
                 let mut read_buf = Vec::new();
                 let mut tmp = [0u8; 65536];
                 loop {
                     tokio::select! {
-                        n = stream.read(&mut tmp) => {
+                        n = reader.read(&mut tmp) => {
                             match n {
                                 Ok(0) => {
                                     info!("Hub connection closed, reconnecting...");
@@ -466,47 +473,43 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                             let my_id = &config.worker_id;
                                             if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| &w.worker_id == my_id) {
                                                 if my_worker.is_first {
-                                                    info!("I am the first worker in pipeline, reporting status to hub before forwarding");
-                                                    let hub_addr = format!("{}:{}", config.hub_addr.split(':').next().unwrap_or("127.0.0.1"), 50051);
-                                                    if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
-                                                        let pipeline_guard = pipeline.read().await;
-                                                        let hb = WorkerHeartbeat {
-                                                            worker_id: config.worker_id.clone(),
-                                                            load: 0.0,
-                                                            layer_offset: pipeline_guard.layer_offset,
-                                                            num_layers: pipeline_guard.num_layers,
-                                                            has_gpu: config.has_gpu,
-                                                            vram_gb: config.vram_gb,
-                                                            active: true,
-                                                            last_hop_connected: my_worker.last_hop.is_some(),
-                                                            next_hop_connected: true,
-                                                        };
-                                                        let msg = HubMessage::Heartbeat(hb);
-                                                        let data = encode_msg(&msg);
-                                                        hub_stream.write_all(&data).await.ok();
-                                                        info!("Sent heartbeat status to hub as first worker");
-                                                    }
+                                                    info!("I am the first worker in pipeline, reporting status to hub via persistent connection");
+                                                    let pipeline_guard = pipeline.read().await;
+                                                    let hb = WorkerHeartbeat {
+                                                        worker_id: config.worker_id.clone(),
+                                                        load: 0.0,
+                                                        layer_offset: pipeline_guard.layer_offset,
+                                                        num_layers: pipeline_guard.num_layers,
+                                                        has_gpu: config.has_gpu,
+                                                        vram_gb: config.vram_gb,
+                                                        active: true,
+                                                        last_hop_connected: my_worker.last_hop.is_some(),
+                                                        next_hop_connected: true,
+                                                    };
+                                                    let msg = HubMessage::Heartbeat(hb);
+                                                    let data = encode_msg(&msg);
+                                                    let mut w = writer.lock().await;
+                                                    w.write_all(&data).await.ok();
+                                                    info!("Sent heartbeat status to hub as first worker");
                                                 } else if my_worker.is_last {
-                                                    info!("I am the last worker in pipeline, reporting status to hub");
-                                                    let hub_addr = format!("{}:{}", config.hub_addr.split(':').next().unwrap_or("127.0.0.1"), 50051);
-                                                    if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
-                                                        let pipeline_guard = pipeline.read().await;
-                                                        let hb = WorkerHeartbeat {
-                                                            worker_id: config.worker_id.clone(),
-                                                            load: 0.0,
-                                                            layer_offset: pipeline_guard.layer_offset,
-                                                            num_layers: pipeline_guard.num_layers,
-                                                            has_gpu: config.has_gpu,
-                                                            vram_gb: config.vram_gb,
-                                                            active: true,
-                                                            last_hop_connected: true,
-                                                            next_hop_connected: false,
-                                                        };
-                                                        let msg = HubMessage::Heartbeat(hb);
-                                                        let data = encode_msg(&msg);
-                                                        hub_stream.write_all(&data).await.ok();
-                                                        info!("Sent heartbeat status to hub as last worker");
-                                                    }
+                                                    info!("I am the last worker in pipeline, reporting status to hub via persistent connection");
+                                                    let pipeline_guard = pipeline.read().await;
+                                                    let hb = WorkerHeartbeat {
+                                                        worker_id: config.worker_id.clone(),
+                                                        load: 0.0,
+                                                        layer_offset: pipeline_guard.layer_offset,
+                                                        num_layers: pipeline_guard.num_layers,
+                                                        has_gpu: config.has_gpu,
+                                                        vram_gb: config.vram_gb,
+                                                        active: true,
+                                                        last_hop_connected: true,
+                                                        next_hop_connected: false,
+                                                    };
+                                                    let msg = HubMessage::Heartbeat(hb);
+                                                    let data = encode_msg(&msg);
+                                                    let mut w = writer.lock().await;
+                                                    w.write_all(&data).await.ok();
+                                                    info!("Sent heartbeat status to hub as last worker");
                                                 }
                                                 
                                                 if let Some(ref hop) = my_worker.next_hop {
@@ -581,9 +584,36 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                             crate::rpc::ensure_llama_server().await
                                                                 .context("Failed to download llama-server")?;
                                                         }
-                                                        // TODO: download model from model_url
-                                                        // For now, the model must be pre-downloaded
                                                         let model_path = crate::config::data_dir().join("model.gguf");
+                                                        if !model_path.exists() && !pipeline_guard.model_url.is_empty() {
+                                                            info!("Downloading model from {}...", pipeline_guard.model_url);
+                                                            let client = Client::new();
+                                                            match client.get(&pipeline_guard.model_url)
+                                                                .timeout(std::time::Duration::from_secs(600))
+                                                                .send().await
+                                                            {
+                                                                Ok(resp) => {
+                                                                    if resp.status().is_success() {
+                                                                        let bytes = resp.bytes().await;
+                                                                        match bytes {
+                                                                            Ok(bytes) => {
+                                                                                if let parent = model_path.parent() {
+                                                                                    std::fs::create_dir_all(parent).ok();
+                                                                                }
+                                                                                match std::fs::write(&model_path, &bytes) {
+                                                                                    Ok(_) => info!("Model downloaded to {:?}", model_path),
+                                                                                    Err(e) => error!("Failed to write model file: {}", e),
+                                                                                }
+                                                                            }
+                                                                            Err(e) => error!("Failed to read model download body: {}", e),
+                                                                        }
+                                                                    } else {
+                                                                        error!("Model download failed with status: {}", resp.status());
+                                                                    }
+                                                                }
+                                                                Err(e) => error!("Model download request failed: {}", e),
+                                                            }
+                                                        }
                                                         if model_path.exists() {
                                                             let ngl = if config.has_gpu { -1 } else { 0 };
                                                             let llama_cmd = crate::rpc::spawn_llama_server(
@@ -673,7 +703,8 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
 
                                             let msg = HubMessage::InferenceResponse(resp_msg);
                                             let data = encode_msg(&msg);
-                                            stream.write_all(&data).await?;
+                                            let mut w = writer.lock().await;
+                                            w.write_all(&data).await?;
                                             info!("Sent inference response {} back to hub", req.id);
                                         }
                                         HubMessage::InferenceForward(fwd) => {
@@ -715,9 +746,10 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                     completion_tokens: ct,
                                                                 };
                                                                 let msg = HubMessage::InferenceResponse(resp_msg);
-                                                                let data = encode_msg(&msg);
-                                                                stream.write_all(&data).await?;
-                                                                info!("Last worker sent inference response {} to hub", fwd.id);
+                                                                 let data = encode_msg(&msg);
+                                                                 let mut w = writer.lock().await;
+                                                                 w.write_all(&data).await?;
+                                                                 info!("Last worker sent inference response {} to hub", fwd.id);
                                                             }
                                                         }
                                                         Err(e) => {
@@ -732,8 +764,9 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                 completion_tokens: 0,
                                                             };
                                                             let msg = HubMessage::InferenceResponse(resp_msg);
-                                                            let data = encode_msg(&msg);
-                                                            stream.write_all(&data).await?;
+                                                             let data = encode_msg(&msg);
+                                                             let mut w = writer.lock().await;
+                                                             w.write_all(&data).await?;
                                                         }
                                                     }
                                                 } else {
@@ -749,7 +782,8 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                         };
                                                         let msg = HubMessage::InferenceForward(forward);
                                                         let data = encode_msg(&msg);
-                                                        stream.write_all(&data).await?;
+                                                        let mut w = writer.lock().await;
+                                                        w.write_all(&data).await?;
                                                         info!("Forwarded inference {} to next worker via hub", fwd.id);
                                                     } else {
                                                         warn!("No next_hop configured, cannot forward inference");
