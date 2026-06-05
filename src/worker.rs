@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+fn encode_msg(msg: &HubMessage) -> Vec<u8> {
+    let mut data = serde_json::to_vec(msg).unwrap_or_default();
+    data.push(b'\n');
+    data
+}
 use tokio::net::{TcpStream, TcpListener};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::Duration;
@@ -207,7 +213,9 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                 info!("Connected to hub at {}", config.hub_addr);
 
                 let register = HubMessage::Register(worker_info.clone());
-                let data = serde_json::to_vec(&register)?;
+                let mut data = serde_json::to_vec(&register)?;
+                data.push(b"
+");
                 stream.write_all(&data).await?;
                 info!("Sent registration to hub");
 
@@ -262,7 +270,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                                             completion_tokens: 0,
                                         };
                                         let msg = HubMessage::InferenceResponse(resp);
-                                        let data = serde_json::to_vec(&msg)?;
+                                        let data = encode_msg(&msg);
                                         stream.write_all(&data).await?;
                                     } else {
                                         error!("Failed to parse llama-server response");
@@ -276,7 +284,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                                             completion_tokens: 0,
                                         };
                                         let msg = HubMessage::InferenceResponse(resp);
-                                        let data = serde_json::to_vec(&msg)?;
+                                        let data = encode_msg(&msg);
                                         stream.write_all(&data).await?;
                                     }
                                 }
@@ -292,7 +300,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                                         completion_tokens: 0,
                                     };
                                     let msg = HubMessage::InferenceResponse(resp);
-                                    let data = serde_json::to_vec(&msg)?;
+                                    let data = encode_msg(&msg);
                                     stream.write_all(&data).await?;
                                 }
                             }
@@ -417,28 +425,39 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                     rpc_port: config.rpc_port,
                 };
                 let register = HubMessage::Register(worker_info);
-                let data = serde_json::to_vec(&register)?;
+                let mut data = serde_json::to_vec(&register)?;
+                data.push(b'\n');
                 stream.write_all(&data).await?;
                 info!("Registered with hub, maintaining persistent connection...");
 
-                // Keep connection alive for cascade messages
-                let mut buf = vec![0u8; 65536];
+                let mut read_buf = Vec::new();
+                let mut tmp = [0u8; 65536];
                 loop {
                     tokio::select! {
-                        n = stream.read(&mut buf) => {
+                        n = stream.read(&mut tmp) => {
                             match n {
                                 Ok(0) => {
                                     info!("Hub connection closed, reconnecting...");
                                     break;
                                 }
                                 Ok(n) => {
-                                    let msg: HubMessage = match serde_json::from_slice(&buf[..n]) {
-                                        Ok(m) => m,
-                                        Err(e) => {
-                                            error!("Failed to parse message: {}", e);
+                                    read_buf.extend_from_slice(&tmp[..n]);
+
+                                    while let Some(pos) = read_buf.iter().position(|&b| b == b'\n') {
+                                        let line: Vec<u8> = read_buf.drain(..=pos).collect();
+                                        let line = &line[..line.len() - 1];
+
+                                        if line.is_empty() {
                                             continue;
                                         }
-                                    };
+
+                                        let msg: HubMessage = match serde_json::from_slice(line) {
+                                            Ok(m) => m,
+                                            Err(e) => {
+                                                error!("Failed to parse message: {}", e);
+                                                continue;
+                                            }
+                                        };
 
                                     match msg {
                                         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
@@ -464,7 +483,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                             next_hop_connected: true,
                                                         };
                                                         let msg = HubMessage::Heartbeat(hb);
-                                                        let data = serde_json::to_vec(&msg).unwrap();
+                                                        let data = encode_msg(&msg);
                                                         hub_stream.write_all(&data).await.ok();
                                                         info!("Sent heartbeat status to hub as first worker");
                                                     }
@@ -485,7 +504,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                             next_hop_connected: false,
                                                         };
                                                         let msg = HubMessage::Heartbeat(hb);
-                                                        let data = serde_json::to_vec(&msg).unwrap();
+                                                        let data = encode_msg(&msg);
                                                         hub_stream.write_all(&data).await.ok();
                                                         info!("Sent heartbeat status to hub as last worker");
                                                     }
@@ -500,7 +519,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                     match tokio::net::TcpStream::connect(&addr).await {
                                                         Ok(mut forward_stream) => {
                                                             let msg = HubMessage::HeartbeatForward { pipeline: pipeline_owned };
-                                                            let data = serde_json::to_vec(&msg).unwrap();
+                                                            let data = encode_msg(&msg);
                                                             forward_stream.write_all(&data).await.ok();
                                                             info!("Heartbeat forwarded to {}", hop_worker_id);
                                                         }
@@ -654,7 +673,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                             };
 
                                             let msg = HubMessage::InferenceResponse(resp_msg);
-                                            let data = serde_json::to_vec(&msg).unwrap();
+                                            let data = encode_msg(&msg);
                                             stream.write_all(&data).await?;
                                             info!("Sent inference response {} back to hub", req.id);
                                         }
@@ -697,7 +716,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                     completion_tokens: ct,
                                                                 };
                                                                 let msg = HubMessage::InferenceResponse(resp_msg);
-                                                                let data = serde_json::to_vec(&msg).unwrap();
+                                                                let data = encode_msg(&msg);
                                                                 stream.write_all(&data).await?;
                                                                 info!("Last worker sent inference response {} to hub", fwd.id);
                                                             }
@@ -714,7 +733,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                 completion_tokens: 0,
                                                             };
                                                             let msg = HubMessage::InferenceResponse(resp_msg);
-                                                            let data = serde_json::to_vec(&msg).unwrap();
+                                                            let data = encode_msg(&msg);
                                                             stream.write_all(&data).await?;
                                                         }
                                                     }
@@ -730,7 +749,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                             data: fwd.data.clone(),
                                                         };
                                                         let msg = HubMessage::InferenceForward(forward);
-                                                        let data = serde_json::to_vec(&msg).unwrap();
+                                                        let data = encode_msg(&msg);
                                                         stream.write_all(&data).await?;
                                                         info!("Forwarded inference {} to next worker via hub", fwd.id);
                                                     } else {
@@ -744,8 +763,10 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                         }
                                         _ => {}
                                     }
+                                } // end while let Some(pos)
                                 }
                                 Err(e) => {
+                                    error!("Read error: {}", e);
                                     error!("Read error: {}", e);
                                 }
                             }
@@ -840,7 +861,7 @@ async fn handle_inbound_connection(
                             completion_tokens: json["usage"]["completion_tokens"].as_u64().unwrap_or(0),
                         };
                         let msg = HubMessage::InferenceResponse(resp);
-                        let data = serde_json::to_vec(&msg)?;
+                        let data = encode_msg(&msg);
                         stream.write_all(&data).await?;
                     }
                 }
