@@ -214,8 +214,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
 
                 let register = HubMessage::Register(worker_info.clone());
                 let mut data = serde_json::to_vec(&register)?;
-                data.push(b"
-");
+                data.push(b'\n');
                 stream.write_all(&data).await?;
                 info!("Sent registration to hub");
 
@@ -587,7 +586,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                         let model_path = crate::config::data_dir().join("model.gguf");
                                                         if model_path.exists() {
                                                             let ngl = if config.has_gpu { -1 } else { 0 };
-                                                            let mut llama_cmd = crate::rpc::spawn_llama_server(
+                                                            let llama_cmd = crate::rpc::spawn_llama_server(
                                                                 &llama_path,
                                                                 &model_path.to_string_lossy(),
                                                                 ngl,
