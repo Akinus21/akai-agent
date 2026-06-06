@@ -158,28 +158,34 @@ mod handlers {
             println!("  GPU:    CPU only");
         }
 
-        // Fetch tunnel certs if not already in config
-        let (ca_cert, client_cert, client_key) = if !cfg.tunnel_ca_cert.is_empty() {
-            (cfg.tunnel_ca_cert.as_bytes().to_vec(), cfg.tunnel_client_cert.as_bytes().to_vec(), cfg.tunnel_client_key.as_bytes().to_vec())
+        // Fetch tunnel certs from hub HTTP API (akai-hub.akinus21.com over HTTPS)
+        // Then connect to tunnel.akinus21.com:443 with mTLS for data
+        let (ca_cert, client_cert, client_key, tunnel_addr) = if !cfg.tunnel_ca_cert.is_empty() {
+            // Already have certs, derive tunnel addr from hub addr
+            let t_addr = derive_tunnel_addr(&hub_addr);
+            (cfg.tunnel_ca_cert.as_bytes().to_vec(), cfg.tunnel_client_cert.as_bytes().to_vec(), cfg.tunnel_client_key.as_bytes().to_vec(), t_addr)
         } else {
             match fetch_tunnel_certs_from_hub(&hub_addr).await {
-                Ok((ca, cert, key)) => {
-                    println!("  Tunnel: certs fetched from hub");
-                    (ca, cert, key)
+                Ok((ca, cert, key, t_addr)) => {
+                    println!("  Tunnel: certs fetched, connecting via {}", t_addr);
+                    (ca, cert, key, t_addr)
                 }
                 Err(e) => {
-                    println!("  Tunnel: no certs available ({})", e);
-                    (Vec::new(), Vec::new(), Vec::new())
+                    println!("  Tunnel: no certs available ({}), using raw TCP", e);
+                    (Vec::new(), Vec::new(), Vec::new(), hub_addr.clone())
                 }
             }
         };
+
+        // If tunnel certs available, connect through tunnel; otherwise raw TCP to hub
+        let data_addr = if !ca_cert.is_empty() { tunnel_addr } else { hub_addr.clone() };
 
         let pid_file = std::path::Path::new("/run/akai-agent.pid");
         std::fs::write(pid_file, std::process::id().to_string())?;
         println!("PID: {} (saved to {})", std::process::id(), pid_file.display());
 
         worker::run_hub_worker(worker::HubWorkerConfig {
-            hub_addr,
+            hub_addr: data_addr,
             worker_id: cfg.worker_id.clone(),
             has_gpu: gpu_info.has_gpu,
             vram_gb: gpu_info.vram_gb as f32,
@@ -191,7 +197,18 @@ mod handlers {
         }).await
     }
 
-async fn fetch_tunnel_certs_from_hub(hub_addr: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    fn derive_tunnel_addr(hub_addr: &str) -> String {
+        // Replace "akai-hub" with "tunnel" in the hostname
+        let parts: Vec<&str> = hub_addr.splitn(2, ':').collect();
+        let host = parts[0].replace("akai-hub", "tunnel");
+        if parts.len() > 1 {
+            format!("{}:{}", host, parts[1])
+        } else {
+            host
+        }
+    }
+
+async fn fetch_tunnel_certs_from_hub(hub_addr: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, String)> {
     let host = hub_addr.split(':').next().unwrap_or("127.0.0.1");
     let url = format!("https://{}/tunnel/certs", host);
     let client = reqwest::Client::builder()
@@ -209,6 +226,9 @@ async fn fetch_tunnel_certs_from_hub(hub_addr: &str) -> Result<(Vec<u8>, Vec<u8>
     if ca.is_empty() {
         anyhow::bail!("no ca_cert in response");
     }
-    Ok((ca, cert, key))
+    let tunnel_host = json["tunnel_host"].as_str().unwrap_or("tunnel.akinus21.com");
+    let tunnel_port = json["tunnel_port"].as_u64().unwrap_or(443);
+    let tunnel_addr = format!("{}:{}", tunnel_host, tunnel_port);
+    Ok((ca, cert, key, tunnel_addr))
 }
 }
