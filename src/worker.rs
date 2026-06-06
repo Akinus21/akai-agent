@@ -3,17 +3,57 @@ use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, TcpListener};
+use tokio::sync::{Mutex, RwLock};
+use tokio::time::Duration;
+use tracing::{info, warn, error};
+use reqwest::Client;
+
+fn needs_tls(addr: &str) -> bool {
+    addr.ends_with(":443")
+}
+
+struct HubConnection {
+    reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    writer: Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
+}
+
+async fn connect_to_hub(addr: &str) -> Result<HubConnection> {
+    let host = addr.split(':').next().unwrap_or("127.0.0.1");
+    let stream = TcpStream::connect(addr).await?;
+    if needs_tls(addr) {
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+        for cert in webpki_roots::TLS_SERVER_ROOTS.iter() {
+            root_store.add(cert.clone()).ok();
+        }
+        let config = tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+        let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string())
+            .map_err(|e| anyhow::anyhow!("invalid server name: {}", e))?;
+        let tls_stream = connector.connect(server_name, stream).await?;
+        let (reader, writer) = tokio::io::split(tls_stream);
+        info!("Connected to hub via TLS");
+        Ok(HubConnection {
+            reader: Box::new(reader),
+            writer: Arc::new(Mutex::new(Box::new(writer))),
+        })
+    } else {
+        let (reader, writer) = stream.into_split();
+        Ok(HubConnection {
+            reader: Box::new(reader),
+            writer: Arc::new(Mutex::new(Box::new(writer))),
+        })
+    }
+}
 
 fn encode_msg(msg: &HubMessage) -> Vec<u8> {
     let mut data = serde_json::to_vec(msg).unwrap_or_default();
     data.push(b'\n');
     data
 }
-use tokio::net::{TcpStream, TcpListener};
-use tokio::sync::{Mutex, RwLock};
-use tokio::time::Duration;
-use tracing::{info, warn, error};
-use reqwest::Client;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerInfo {
@@ -408,13 +448,10 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
 
     // Persistent connection to hub
     loop {
-        match tokio::net::TcpStream::connect(&config.hub_addr).await {
-            Ok(stream) => {
-                info!("Connected to hub, registering...");
-
-                let (reader, writer) = stream.into_split();
-                let mut reader = reader;
-                let writer = Arc::new(Mutex::new(writer));
+        match connect_to_hub(&config.hub_addr).await {
+            Ok(conn) => {
+                let mut reader = conn.reader;
+                let writer = conn.writer;
 
                 // Register with hub
                 let worker_info = WorkerInfo {
