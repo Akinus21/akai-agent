@@ -608,18 +608,41 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                             {
                                                                 Ok(resp) => {
                                                                     if resp.status().is_success() {
-                                                                        match resp.bytes().await {
-                                                                            Ok(bytes) => {
-                                                                                if let Some(parent) = model_path.parent() {
-                                                                                    std::fs::create_dir_all(parent).ok();
+                                                                        let total = resp.content_length().unwrap_or(0);
+                                                                        if total > 0 {
+                                                                            info!("Model size: {:.1} MB", total as f64 / 1_048_576.0);
+                                                                        }
+                                                                        let mut downloaded: u64 = 0;
+                                                                        let mut last_pct: u64 = 0;
+                                                                        if let Some(parent) = model_path.parent() {
+                                                                            std::fs::create_dir_all(parent).ok();
+                                                                        }
+                                                                        let mut file = std::fs::File::create(&model_path)?;
+                                                                        let mut stream = resp.bytes_stream();
+                                                                        use futures_util::StreamExt;
+                                                                        while let Some(chunk) = stream.next().await {
+                                                                            let chunk = match chunk {
+                                                                                Ok(c) => c,
+                                                                                Err(e) => {
+                                                                                    error!("Model download stream error: {}", e);
+                                                                                    break;
                                                                                 }
-                                                                                match std::fs::write(&model_path, &bytes) {
-                                                                                    Ok(_) => info!("Model downloaded to {:?}", model_path),
-                                                                                    Err(e) => error!("Failed to write model file: {}", e),
+                                                                            };
+                                                                            downloaded += chunk.len() as u64;
+                                                                            if total > 0 {
+                                                                                let pct = downloaded * 100 / total;
+                                                                                if pct >= last_pct + 10 {
+                                                                                    info!("Model download: {}% ({:.1}/{:.1} MB)", 
+                                                                                        pct, downloaded as f64 / 1_048_576.0, total as f64 / 1_048_576.0);
+                                                                                    last_pct = pct;
                                                                                 }
                                                                             }
-                                                                            Err(e) => error!("Failed to read model download body: {}", e),
+                                                                            use std::io::Write;
+                                                                            file.write_all(&chunk)?;
                                                                         }
+                                                                        file.flush()?;
+                                                                        drop(file);
+                                                                        info!("Model downloaded to {:?} ({:.1} MB)", model_path, downloaded as f64 / 1_048_576.0);
                                                                     } else {
                                                                         error!("Model download failed with status: {}", resp.status());
                                                                     }
@@ -630,11 +653,8 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                         // Start llama-server if model exists and not already running
                                                         if model_path.exists() && !pipeline_guard.llama_server_started {
                                                             let llama_path = crate::rpc::llama_server_path();
-                                                            if !llama_path.exists() {
-                                                                info!("Downloading llama-server...");
-                                                                crate::rpc::ensure_llama_server().await
-                                                                    .context("Failed to download llama-server")?;
-                                                            }
+                                                            crate::rpc::ensure_llama_server().await
+                                                                .context("Failed to ensure llama-server")?;
                                                             let ngl = if config.has_gpu { -1 } else { 0 };
                                                             let llama_cmd = crate::rpc::spawn_llama_server(
                                                                 &llama_path,
