@@ -34,6 +34,8 @@ pub struct Config {
     pub petals_model: String,
     #[serde(default)]
     pub hub_addr: String,
+    #[serde(default)]
+    pub hub_api_url: String,
 }
 
 impl Config {

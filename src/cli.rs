@@ -17,6 +17,9 @@ pub enum Commands {
 
         #[arg(long)]
         username: String,
+
+        #[arg(long)]
+        api_url: Option<String>,
     },
 
     Clean,
@@ -29,8 +32,8 @@ pub enum Commands {
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Init { hub, username } =>
-            handlers::init(&hub, &username).await,
+        Commands::Init { hub, username, api_url } =>
+            handlers::init(&hub, &username, api_url.as_deref()).await,
         Commands::Clean       => handlers::clean(),
         Commands::Start       => handlers::start().await,
         Commands::Stop        => handlers::stop(),
@@ -65,14 +68,21 @@ mod handlers {
         Ok(())
     }
 
-    pub async fn init(hub: &str, username: &str) -> Result<()> {
+    pub async fn init(hub: &str, username: &str, api_url: Option<&str>) -> Result<()> {
         let device_name = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "akai-worker".to_string());
         let worker_id = format!("{}:{}", username, device_name);
 
+        // hub is the VPN address (e.g. 10.8.0.1:50051)
+        // api_url is the public HTTP API for enrollment (e.g. http://akai-hub.akinus21.com:8080)
+        let hub_api = api_url.unwrap_or("").to_string();
+
         println!("Initializing akai-agent worker");
         println!("  Hub:      {}", hub);
+        if !hub_api.is_empty() {
+            println!("  API URL: {}", hub_api);
+        }
         println!("  Worker:   {}", worker_id);
 
         let gpu_info = gpu::detect_gpu();
@@ -104,6 +114,7 @@ mod handlers {
             hub_port:    50051,
             petals_model: String::new(),
             hub_addr:    hub.to_string(),
+            hub_api_url: hub_api,
         };
 
         config::save_config(&cfg)?;
@@ -167,13 +178,15 @@ mod handlers {
                 .unwrap_or(false);
 
         let hub_connect_addr = if vpn_connected {
-            // Already on VPN, extract the hub address
             println!("  VPN:    already connected (wg0 up)");
             hub_addr.clone()
+        } else if cfg.hub_api_url.is_empty() {
+            eprintln!("VPN not connected and no hub API URL configured.");
+            eprintln!("Run: akai-agent init --hub <vpn_addr> --username <user> --api-url <public_api_url>");
+            anyhow::bail!("Cannot enroll VPN without hub API URL");
         } else {
-            // Need to enroll VPN via hub HTTP API
-            println!("  VPN:    not connected, enrolling...");
-            match enroll_vpn(&hub_addr, &cfg.worker_id, &cfg.username).await {
+            println!("  VPN:    not connected, enrolling via {}...", cfg.hub_api_url);
+            match enroll_vpn(&cfg.hub_api_url, &cfg.worker_id, &cfg.username).await {
                 Ok(vpn_addr) => {
                     println!("  VPN:    enrolled, hub at {}", vpn_addr);
                     vpn_addr
@@ -200,15 +213,8 @@ mod handlers {
         }).await
     }
 
-    async fn enroll_vpn(hub_addr: &str, worker_id: &str, username: &str) -> Result<String> {
-        let hub_http = if hub_addr.contains(':') {
-            hub_addr.to_string()
-        } else {
-            format!("{}:8080", hub_addr)
-        };
-        // If hub_addr is a VPN IP (10.8.0.x), use it directly for HTTP too
-        // Otherwise, try the hub's HTTP API on port 8080
-        let url = format!("http://{}:8080/auth/vpn", hub_addr.split(':').next().unwrap_or(hub_addr));
+    async fn enroll_vpn(hub_api_url: &str, worker_id: &str, username: &str) -> Result<String> {
+        let url = format!("{}/auth/vpn", hub_api_url.trim_end_matches('/'));
 
         let client = reqwest::Client::new();
         let resp = client.post(&url)
