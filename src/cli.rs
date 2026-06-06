@@ -158,14 +158,14 @@ mod handlers {
             println!("  GPU:    CPU only");
         }
 
-        // Fetch tunnel certs from hub HTTP API (akai-hub.akinus21.com over HTTPS)
-        // Then connect to tunnel.akinus21.com:443 with mTLS for data
+        // Fetch tunnel certs from hub HTTP API over HTTPS
+        // Data connection uses mTLS to tunnel.akinus21.com:443
+        let hub_api_host = derive_api_host(&hub_addr);
         let (ca_cert, client_cert, client_key, tunnel_addr) = if !cfg.tunnel_ca_cert.is_empty() {
-            // Already have certs, derive tunnel addr from hub addr
             let t_addr = derive_tunnel_addr(&hub_addr);
             (cfg.tunnel_ca_cert.as_bytes().to_vec(), cfg.tunnel_client_cert.as_bytes().to_vec(), cfg.tunnel_client_key.as_bytes().to_vec(), t_addr)
         } else {
-            match fetch_tunnel_certs_from_hub(&hub_addr).await {
+            match fetch_tunnel_certs_from_hub(&hub_api_host).await {
                 Ok((ca, cert, key, t_addr)) => {
                     println!("  Tunnel: certs fetched, connecting via {}", t_addr);
                     (ca, cert, key, t_addr)
@@ -198,9 +198,18 @@ mod handlers {
     }
 
     fn derive_tunnel_addr(hub_addr: &str) -> String {
-        // Replace "akai-hub" with "tunnel" in the hostname
         let parts: Vec<&str> = hub_addr.splitn(2, ':').collect();
         let host = parts[0].replace("akai-hub", "tunnel");
+        if parts.len() > 1 {
+            format!("{}:{}", host, parts[1])
+        } else {
+            host
+        }
+    }
+
+    fn derive_api_host(hub_addr: &str) -> String {
+        let parts: Vec<&str> = hub_addr.splitn(2, ':').collect();
+        let host = parts[0].replace("tunnel", "akai-hub");
         if parts.len() > 1 {
             format!("{}:{}", host, parts[1])
         } else {
