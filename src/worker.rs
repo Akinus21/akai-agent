@@ -620,6 +620,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                         let mut file = std::fs::File::create(&model_path)?;
                                                                         let mut stream = resp.bytes_stream();
                                                                         use futures_util::StreamExt;
+                                                                        use std::io::Write;
                                                                         while let Some(chunk) = stream.next().await {
                                                                             let chunk = match chunk {
                                                                                 Ok(c) => c,
@@ -637,7 +638,6 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                                     last_pct = pct;
                                                                                 }
                                                                             }
-                                                                            use std::io::Write;
                                                                             file.write_all(&chunk)?;
                                                                         }
                                                                         file.flush()?;
