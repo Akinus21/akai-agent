@@ -40,8 +40,6 @@ pub struct Config {
     pub tunnel_client_cert: String,
     #[serde(default)]
     pub tunnel_client_key: String,
-    #[serde(default)]
-    pub queue_url: String,
 }
 
 impl Config {
