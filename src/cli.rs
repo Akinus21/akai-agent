@@ -107,7 +107,6 @@ mod handlers {
             tunnel_ca_cert: String::new(),
             tunnel_client_cert: String::new(),
             tunnel_client_key: String::new(),
-            queue_url: String::new(),
         };
 
         config::save_config(&cfg)?;
