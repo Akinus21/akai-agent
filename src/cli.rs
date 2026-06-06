@@ -104,9 +104,6 @@ mod handlers {
             hub_port:    50051,
             petals_model: String::new(),
             hub_addr:    hub.to_string(),
-            tunnel_ca_cert: String::new(),
-            tunnel_client_cert: String::new(),
-            tunnel_client_key: String::new(),
         };
 
         config::save_config(&cfg)?;
@@ -158,86 +155,17 @@ mod handlers {
             println!("  GPU:    CPU only");
         }
 
-        // Fetch tunnel certs from hub HTTP API over HTTPS
-        // Data connection uses mTLS to tunnel.akinus21.com:443
-        let hub_api_host = derive_api_host(&hub_addr);
-        let (ca_cert, client_cert, client_key, tunnel_addr) = if !cfg.tunnel_ca_cert.is_empty() {
-            let t_addr = derive_tunnel_addr(&hub_addr);
-            (cfg.tunnel_ca_cert.as_bytes().to_vec(), cfg.tunnel_client_cert.as_bytes().to_vec(), cfg.tunnel_client_key.as_bytes().to_vec(), t_addr)
-        } else {
-            match fetch_tunnel_certs_from_hub(&hub_api_host).await {
-                Ok((ca, cert, key, t_addr)) => {
-                    println!("  Tunnel: certs fetched, connecting via {}", t_addr);
-                    (ca, cert, key, t_addr)
-                }
-                Err(e) => {
-                    println!("  Tunnel: no certs available ({}), using raw TCP", e);
-                    (Vec::new(), Vec::new(), Vec::new(), hub_addr.clone())
-                }
-            }
-        };
-
-        // If tunnel certs available, connect through tunnel; otherwise raw TCP to hub
-        let data_addr = if !ca_cert.is_empty() { tunnel_addr } else { hub_addr.clone() };
-
         let pid_file = std::path::Path::new("/run/akai-agent.pid");
         std::fs::write(pid_file, std::process::id().to_string())?;
         println!("PID: {} (saved to {})", std::process::id(), pid_file.display());
 
         worker::run_hub_worker(worker::HubWorkerConfig {
-            hub_addr: data_addr,
+            hub_addr,
             worker_id: cfg.worker_id.clone(),
             has_gpu: gpu_info.has_gpu,
             vram_gb: gpu_info.vram_gb as f32,
             rpc_port: cfg.rpc_port,
             llama_port: cfg.llama_port,
-            tunnel_ca_cert: ca_cert,
-            tunnel_client_cert: client_cert,
-            tunnel_client_key: client_key,
         }).await
     }
-
-    fn derive_tunnel_addr(hub_addr: &str) -> String {
-        let parts: Vec<&str> = hub_addr.splitn(2, ':').collect();
-        let host = parts[0].replace("akai-hub", "tunnel");
-        if parts.len() > 1 {
-            format!("{}:{}", host, parts[1])
-        } else {
-            host
-        }
-    }
-
-    fn derive_api_host(hub_addr: &str) -> String {
-        let parts: Vec<&str> = hub_addr.splitn(2, ':').collect();
-        let host = parts[0].replace("tunnel", "akai-hub");
-        if parts.len() > 1 {
-            format!("{}:{}", host, parts[1])
-        } else {
-            host
-        }
-    }
-
-async fn fetch_tunnel_certs_from_hub(hub_addr: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, String)> {
-    let host = hub_addr.split(':').next().unwrap_or("127.0.0.1");
-    let url = format!("https://{}/tunnel/certs", host);
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-    let resp = client.get(&url).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("hub returned {}", resp.status());
-    }
-    let json: serde_json::Value = resp.json().await?;
-    let ca = json["ca_cert"].as_str().unwrap_or("").as_bytes().to_vec();
-    let cert = json["worker_cert"].as_str().unwrap_or("").as_bytes().to_vec();
-    let key = json["worker_key"].as_str().unwrap_or("").as_bytes().to_vec();
-    if ca.is_empty() {
-        anyhow::bail!("no ca_cert in response");
-    }
-    let tunnel_host = json["tunnel_host"].as_str().unwrap_or("tunnel.akinus21.com");
-    let tunnel_port = json["tunnel_port"].as_u64().unwrap_or(443);
-    let tunnel_addr = format!("{}:{}", tunnel_host, tunnel_port);
-    Ok((ca, cert, key, tunnel_addr))
-}
 }

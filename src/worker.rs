@@ -9,74 +9,6 @@ use tokio::time::Duration;
 use tracing::{info, warn, error};
 use reqwest::Client;
 
-fn needs_tls(addr: &str) -> bool {
-    addr.ends_with(":443")
-}
-
-struct HubConnection {
-    reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
-    writer: Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
-}
-
-async fn connect_to_hub(addr: &str, ca_cert: &[u8], client_cert: &[u8], client_key: &[u8]) -> Result<HubConnection> {
-    let host = addr.split(':').next().unwrap_or("127.0.0.1");
-    let stream = TcpStream::connect(addr).await?;
-    if needs_tls(addr) && !ca_cert.is_empty() {
-        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
-        let ca_certs = rustls_pemfile::certs(&mut std::io::Cursor::new(ca_cert))
-            .collect::<Result<Vec<_>, _>>()
-            .context("failed to parse CA cert")?;
-        for cert in ca_certs {
-            root_store.add(cert).ok();
-        }
-        let client_certs = rustls_pemfile::certs(&mut std::io::Cursor::new(client_cert))
-            .collect::<Result<Vec<_>, _>>()
-            .context("failed to parse client cert")?;
-        let client_key = rustls_pemfile::private_key(&mut std::io::Cursor::new(client_key))
-            .context("failed to parse client key")?
-            .context("no client key")?;
-        let config = tokio_rustls::rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_client_auth_cert(client_certs, client_key)
-            .map_err(|e| anyhow::anyhow!("client auth cert failed: {e}"))?;
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
-        let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string())
-            .map_err(|e| anyhow::anyhow!("invalid server name: {}", e))?;
-        let tls_stream = connector.connect(server_name, stream).await?;
-        let (reader, writer) = tokio::io::split(tls_stream);
-        info!("Connected to hub via mTLS tunnel");
-        Ok(HubConnection {
-            reader: Box::new(reader),
-            writer: Arc::new(Mutex::new(Box::new(writer))),
-        })
-    } else if needs_tls(addr) {
-        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let config = tokio_rustls::rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
-        let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string())
-            .map_err(|e| anyhow::anyhow!("invalid server name: {}", e))?;
-        let tls_stream = connector.connect(server_name, stream).await?;
-        let (reader, writer) = tokio::io::split(tls_stream);
-        info!("Connected to hub via TLS");
-        Ok(HubConnection {
-            reader: Box::new(reader),
-            writer: Arc::new(Mutex::new(Box::new(writer))),
-        })
-    } else {
-        let (reader, writer) = stream.into_split();
-        info!("Connected to hub (raw TCP)");
-        Ok(HubConnection {
-            reader: Box::new(reader),
-            writer: Arc::new(Mutex::new(Box::new(writer))),
-        })
-    }
-}
-
 fn encode_msg(msg: &HubMessage) -> Vec<u8> {
     let mut data = serde_json::to_vec(msg).unwrap_or_default();
     data.push(b'\n');
@@ -395,9 +327,6 @@ pub struct HubWorkerConfig {
     pub vram_gb: f32,
     pub rpc_port: u16,
     pub llama_port: u16,
-    pub tunnel_ca_cert: Vec<u8>,
-    pub tunnel_client_cert: Vec<u8>,
-    pub tunnel_client_key: Vec<u8>,
 }
 
 pub struct PipelineState {
@@ -477,12 +406,15 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
         std::process::exit(0);
     });
 
-    // Persistent connection to hub
+    // Persistent connection to hub over WireGuard VPN
     loop {
-        match connect_to_hub(&config.hub_addr, &config.tunnel_ca_cert, &config.tunnel_client_cert, &config.tunnel_client_key).await {
-            Ok(conn) => {
-                let mut reader = conn.reader;
-                let writer = conn.writer;
+        match TcpStream::connect(&config.hub_addr).await {
+            Ok(stream) => {
+                info!("Connected to hub at {}", config.hub_addr);
+
+                let (reader, writer) = stream.into_split();
+                let mut reader = reader;
+                let writer = Arc::new(Mutex::new(writer));
 
                 // Register with hub
                 let worker_info = WorkerInfo {
