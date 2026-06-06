@@ -34,6 +34,14 @@ pub struct Config {
     pub petals_model: String,
     #[serde(default)]
     pub hub_addr: String,
+    #[serde(default)]
+    pub tunnel_ca_cert: String,
+    #[serde(default)]
+    pub tunnel_client_cert: String,
+    #[serde(default)]
+    pub tunnel_client_key: String,
+    #[serde(default)]
+    pub queue_url: String,
 }
 
 impl Config {

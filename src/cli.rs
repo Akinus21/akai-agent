@@ -104,6 +104,10 @@ mod handlers {
             hub_port:    50051,
             petals_model: String::new(),
             hub_addr:    hub.to_string(),
+            tunnel_ca_cert: String::new(),
+            tunnel_client_cert: String::new(),
+            tunnel_client_key: String::new(),
+            queue_url: String::new(),
         };
 
         config::save_config(&cfg)?;
@@ -155,6 +159,22 @@ mod handlers {
             println!("  GPU:    CPU only");
         }
 
+        // Fetch tunnel certs if not already in config
+        let (ca_cert, client_cert, client_key) = if !cfg.tunnel_ca_cert.is_empty() {
+            (cfg.tunnel_ca_cert.as_bytes().to_vec(), cfg.tunnel_client_cert.as_bytes().to_vec(), cfg.tunnel_client_key.as_bytes().to_vec())
+        } else {
+            match fetch_tunnel_certs_from_hub(&hub_addr).await {
+                Ok((ca, cert, key)) => {
+                    println!("  Tunnel: certs fetched from hub");
+                    (ca, cert, key)
+                }
+                Err(e) => {
+                    println!("  Tunnel: no certs available ({})", e);
+                    (Vec::new(), Vec::new(), Vec::new())
+                }
+            }
+        };
+
         let pid_file = std::path::Path::new("/run/akai-agent.pid");
         std::fs::write(pid_file, std::process::id().to_string())?;
         println!("PID: {} (saved to {})", std::process::id(), pid_file.display());
@@ -166,6 +186,30 @@ mod handlers {
             vram_gb: gpu_info.vram_gb as f32,
             rpc_port: cfg.rpc_port,
             llama_port: cfg.llama_port,
+            tunnel_ca_cert: ca_cert,
+            tunnel_client_cert: client_cert,
+            tunnel_client_key: client_key,
         }).await
     }
+
+async fn fetch_tunnel_certs_from_hub(hub_addr: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let host = hub_addr.split(':').next().unwrap_or("127.0.0.1");
+    let url = format!("https://{}/tunnel/certs", host);
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("hub returned {}", resp.status());
+    }
+    let json: serde_json::Value = resp.json().await?;
+    let ca = json["ca_cert"].as_str().unwrap_or("").as_bytes().to_vec();
+    let cert = json["worker_cert"].as_str().unwrap_or("").as_bytes().to_vec();
+    let key = json["worker_key"].as_str().unwrap_or("").as_bytes().to_vec();
+    if ca.is_empty() {
+        anyhow::bail!("no ca_cert in response");
+    }
+    Ok((ca, cert, key))
+}
 }
