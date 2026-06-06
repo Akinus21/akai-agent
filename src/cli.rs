@@ -155,17 +155,104 @@ mod handlers {
             println!("  GPU:    CPU only");
         }
 
+        // Ensure WireGuard VPN is connected
+        let vpn_connected = std::path::Path::new("/dev/net/tun").exists()
+            && std::process::Command::new("wg")
+                .arg("show")
+                .arg("wg0")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+        let hub_connect_addr = if vpn_connected {
+            // Already on VPN, extract the hub address
+            println!("  VPN:    already connected (wg0 up)");
+            hub_addr.clone()
+        } else {
+            // Need to enroll VPN via hub HTTP API
+            println!("  VPN:    not connected, enrolling...");
+            match enroll_vpn(&hub_addr, &cfg.worker_id, &cfg.username).await {
+                Ok(vpn_addr) => {
+                    println!("  VPN:    enrolled, hub at {}", vpn_addr);
+                    vpn_addr
+                }
+                Err(e) => {
+                    eprintln!("VPN enrollment failed: {}", e);
+                    eprintln!("Falling back to direct connection to {}", hub_addr);
+                    hub_addr.clone()
+                }
+            }
+        };
+
         let pid_file = std::path::Path::new("/run/akai-agent.pid");
         std::fs::write(pid_file, std::process::id().to_string())?;
         println!("PID: {} (saved to {})", std::process::id(), pid_file.display());
 
         worker::run_hub_worker(worker::HubWorkerConfig {
-            hub_addr,
+            hub_addr: hub_connect_addr,
             worker_id: cfg.worker_id.clone(),
             has_gpu: gpu_info.has_gpu,
             vram_gb: gpu_info.vram_gb as f32,
             rpc_port: cfg.rpc_port,
             llama_port: cfg.llama_port,
         }).await
+    }
+
+    async fn enroll_vpn(hub_addr: &str, worker_id: &str, username: &str) -> Result<String> {
+        let hub_http = if hub_addr.contains(':') {
+            hub_addr.to_string()
+        } else {
+            format!("{}:8080", hub_addr)
+        };
+        // If hub_addr is a VPN IP (10.8.0.x), use it directly for HTTP too
+        // Otherwise, try the hub's HTTP API on port 8080
+        let url = format!("http://{}:8080/auth/vpn", hub_addr.split(':').next().unwrap_or(hub_addr));
+
+        let client = reqwest::Client::new();
+        let resp = client.post(&url)
+            .json(&serde_json::json!({
+                "username": username,
+                "worker_name": worker_id.split(':').last().unwrap_or("worker"),
+            }))
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await
+            .context("Failed to reach hub for VPN enrollment")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Hub returned {}: {}", status, body);
+        }
+
+        let json: serde_json::Value = resp.json().await?;
+        let config_text = json["wireguard_config"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing wireguard_config in response"))?;
+        let hub_vpn_addr = json["hub_vpn_addr"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing hub_vpn_addr in response"))?;
+
+        // Write WireGuard config
+        let wg_dir = std::path::Path::new("/etc/wireguard");
+        std::fs::create_dir_all(wg_dir)?;
+        let wg_conf = wg_dir.join("wg0.conf");
+        std::fs::write(&wg_conf, config_text)?;
+        println!("  VPN:    config written to {}", wg_conf.display());
+
+        // Bring up WireGuard
+        let output = std::process::Command::new("wg-quick")
+            .arg("up")
+            .arg("wg0")
+            .output()
+            .context("wg-quick not found — is wireguard-tools installed?")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("wg-quick up wg0 failed: {}", stderr);
+        }
+        println!("  VPN:    WireGuard interface wg0 brought up");
+
+        Ok(hub_vpn_addr.to_string())
     }
 }
