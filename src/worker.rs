@@ -24,9 +24,7 @@ async fn connect_to_hub(addr: &str) -> Result<HubConnection> {
     if needs_tls(addr) {
         let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
-        for cert in webpki_roots::TLS_SERVER_ROOTS.iter() {
-            root_store.add(cert.clone()).ok();
-        }
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let config = tokio_rustls::rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth();

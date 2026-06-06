@@ -527,7 +527,8 @@ pub async fn ensure_llama_server() -> Result<PathBuf> {
                 let lib_name = entry.path().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).unwrap_or_default();
                 if !lib_name.is_empty() {
                     let lib_dest = lib_dir.join(&lib_name);
-                    if let Some(link_target) = entry.link_name().map(|p| p.to_string_lossy().to_string()) {
+                    if let Some(link_name) = entry.link_name() {
+                        let link_target = link_name.to_string_lossy().to_string();
                         // Remove existing file/symlink first
                         std::fs::remove_file(&lib_dest).ok();
                         if std::os::unix::fs::symlink(&link_target, &lib_dest).is_ok() {
