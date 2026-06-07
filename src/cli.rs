@@ -239,11 +239,21 @@ mod handlers {
         let hub_vpn_addr = json["hub_vpn_addr"].as_str()
             .ok_or_else(|| anyhow::anyhow!("missing hub_vpn_addr in response"))?;
 
+        // Bring down existing WireGuard if up
+        let _ = std::process::Command::new("wg-quick")
+            .args(["down", "wg0"])
+            .output();
+
         // Write WireGuard config (split tunnel — only VPN traffic)
         // Model downloads go through hub's /model/download proxy over VPN
         let config_text = config_text
             .replace("AllowedIPs = 0.0.0.0/0, ::/0", "AllowedIPs = 10.8.0.0/24")
-            .replace("PersistentKeepalive = 0", "PersistentKeepalive = 25");
+            .replace("AllowedIPs = 0.0.0.0/0", "AllowedIPs = 10.8.0.0/24")
+            .replace("PersistentKeepalive = 0", "PersistentKeepalive = 25")
+            .lines()
+            .filter(|line| !line.trim().starts_with("DNS ="))
+            .collect::<Vec<_>>()
+            .join("\n");
         let wg_conf = std::path::Path::new("/etc/wireguard/wg0.conf");
         std::fs::write(wg_conf, &config_text)?;
         println!("  VPN:    config written to {}", wg_conf.display());
