@@ -477,12 +477,15 @@ pub fn llama_server_port_flag(binary: &Path) -> &'static str {
         .arg("--help")
         .output()
     {
-        let help = String::from_utf8_lossy(&output.stdout);
+        let help = String::from_utf8_lossy(&output.stdout) + &String::from_utf8_lossy(&output.stderr);
         if help.contains("--port") {
             return "--port";
         }
+        if help.contains("\n-p ") {
+            return "-p";
+        }
     }
-    "-p"
+    "--port"
 }
 
 pub fn spawn_llama_server(binary: &Path, model_path: &str, n_gpu_layers: i32, port: u16) -> Result<std::process::Child> {
