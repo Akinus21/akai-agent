@@ -11,32 +11,47 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    #[command(about = "Register and start the worker (clean first if flags provided)")]
     Init {
         #[arg(long)]
-        hub: String,
+        hub: Option<String>,
 
         #[arg(long)]
-        username: String,
+        username: Option<String>,
 
         #[arg(long)]
         api_url: Option<String>,
     },
 
+    #[command(about = "Remove all local data and VPN config")]
     Clean,
 
-    Start,
-
+    #[command(about = "Stop the running worker")]
     Stop,
+
+    #[command(about = "Upgrade akai-agent via Homebrew")]
+    Upgrade,
 }
 
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Init { hub, username, api_url } =>
-            handlers::init(&hub, &username, api_url.as_deref()).await,
-        Commands::Clean       => handlers::clean(),
-        Commands::Start       => handlers::start().await,
-        Commands::Stop        => handlers::stop(),
+        Commands::Init { hub, username, api_url } => {
+            let has_flags = hub.is_some() || username.is_some() || api_url.is_some();
+            if has_flags {
+                handlers::clean()?;
+                handlers::init_and_start(
+                    hub.as_deref().unwrap_or_default(),
+                    username.as_deref().unwrap_or_default(),
+                    api_url.as_deref(),
+                ).await
+            } else {
+                handlers::resume_and_start().await
+            }
+        }
+        Commands::Clean => handlers::clean(),
+        Commands::Stop  => handlers::stop(),
+        Commands::Upgrade => handlers::upgrade(),
     }
 }
 
@@ -58,6 +73,10 @@ mod handlers {
             }
         }
 
+        let _ = std::process::Command::new("wg-quick")
+            .args(["down", "wg0"])
+            .output();
+
         let wireguard_conf = "/etc/wireguard/wg0.conf";
         if std::path::Path::new(wireguard_conf).exists() {
             std::fs::remove_file(wireguard_conf)?;
@@ -68,14 +87,16 @@ mod handlers {
         Ok(())
     }
 
-    pub async fn init(hub: &str, username: &str, api_url: Option<&str>) -> Result<()> {
+    pub async fn init_and_start(hub: &str, username: &str, api_url: Option<&str>) -> Result<()> {
+        if hub.is_empty() || username.is_empty() {
+            anyhow::bail!("--hub and --username are required for initial setup");
+        }
+
         let device_name = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "akai-worker".to_string());
         let worker_id = format!("{}:{}", username, device_name);
 
-        // hub is the VPN address (e.g. 10.8.0.1:50051)
-        // api_url is the public HTTP API for enrollment (e.g. http://akai-hub.akinus21.com:8080)
         let hub_api = api_url.unwrap_or("").to_string();
 
         println!("Initializing akai-agent worker");
@@ -120,35 +141,28 @@ mod handlers {
         config::save_config(&cfg)?;
         println!("Config saved to {}", config::config_path().display());
 
-        println!();
-        println!("Initialization complete!");
-        println!("   Run:  sudo akai-agent start");
-        Ok(())
+        start_worker(&cfg).await
     }
 
-    pub fn stop() -> Result<()> {
-        let pid_file = std::path::Path::new("/run/akai-agent.pid");
-        if pid_file.exists() {
-            let pid: i32 = std::fs::read_to_string(pid_file)?
-                .trim()
-                .parse()
-                .context("Invalid PID file")?;
-            println!("Stopping akai-agent (PID {})...", pid);
-            std::process::Command::new("kill")
-                .arg(pid.to_string())
-                .status()?;
-            std::fs::remove_file(pid_file)?;
-            println!("Stopped.");
-        } else {
-            println!("Not running (no PID file).");
-        }
-        Ok(())
-    }
-
-    pub async fn start() -> Result<()> {
+    pub async fn resume_and_start() -> Result<()> {
         let cfg = config::load_config()
-            .context("Config not found. Run `akai-agent init` first.")?;
+            .context("No saved config found. Run: akai-agent init --hub <addr> --username <user>")?;
 
+        if cfg.hub_addr.is_empty() || cfg.username.is_empty() {
+            anyhow::bail!("Config incomplete. Run: akai-agent init --hub <addr> --username <user>");
+        }
+
+        println!("Resuming akai-agent worker");
+        println!("  Hub:      {}", cfg.hub_addr);
+        if !cfg.hub_api_url.is_empty() {
+            println!("  API URL: {}", cfg.hub_api_url);
+        }
+        println!("  Worker:   {}", cfg.worker_id);
+
+        start_worker(&cfg).await
+    }
+
+    async fn start_worker(cfg: &config::Config) -> Result<()> {
         let hub_addr = if !cfg.hub_addr.is_empty() {
             cfg.hub_addr.clone()
         } else {
@@ -211,6 +225,50 @@ mod handlers {
             rpc_port: cfg.rpc_port,
             llama_port: cfg.llama_port,
         }).await
+    }
+
+    pub fn stop() -> Result<()> {
+        let pid_file = std::path::Path::new("/run/akai-agent.pid");
+        if pid_file.exists() {
+            let pid: i32 = std::fs::read_to_string(pid_file)?
+                .trim()
+                .parse()
+                .context("Invalid PID file")?;
+            println!("Stopping akai-agent (PID {})...", pid);
+            std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .status()?;
+            std::fs::remove_file(pid_file)?;
+            println!("Stopped.");
+        } else {
+            println!("Not running (no PID file).");
+        }
+        Ok(())
+    }
+
+    pub fn upgrade() -> Result<()> {
+        println!("Upgrading akai-agent...");
+
+        println!("Running brew update...");
+        let update = std::process::Command::new("brew")
+            .arg("update")
+            .status()
+            .context("brew not found — is Homebrew installed?")?;
+        if !update.success() {
+            anyhow::bail!("brew update failed");
+        }
+
+        println!("Running brew upgrade akai-agent...");
+        let upgrade = std::process::Command::new("brew")
+            .arg("upgrade")
+            .arg("akai-agent")
+            .status()?;
+        if !upgrade.success() {
+            anyhow::bail!("brew upgrade akai-agent failed");
+        }
+
+        println!("Upgrade complete.");
+        Ok(())
     }
 
     async fn enroll_vpn(hub_api_url: &str, worker_id: &str, username: &str) -> Result<String> {
