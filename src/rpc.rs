@@ -477,7 +477,7 @@ pub fn llama_server_port_flag(binary: &Path) -> &'static str {
         .arg("--help")
         .output()
     {
-        let help = String::from_utf8_lossy(&output.stdout) + &String::from_utf8_lossy(&output.stderr);
+        let help = String::from_utf8_lossy(&output.stdout).into_owned() + &String::from_utf8_lossy(&output.stderr);
         if help.contains("--port") {
             return "--port";
         }
