@@ -1,5 +1,6 @@
 use anyhow::{Result, Context};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -180,6 +181,8 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
 
     let llama_port = 8080u16;
     let n_gpu_layers = if config.has_gpu { config.n_gpu_layers } else { 0 };
+    let llama_binary = PathBuf::from(config.llama_server_path.as_deref().unwrap_or("llama-server"));
+    let port_flag = crate::rpc::llama_server_port_flag(&llama_binary);
 
     info!("Starting llama-server on port {}...", llama_port);
     let mut child = Command::new(config.llama_server_path.as_deref().unwrap_or("llama-server"))
@@ -187,7 +190,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
             "-m", &config.model_path,
             "-c", "4096",
             "-ngl", &n_gpu_layers.to_string(),
-            "--port", &llama_port.to_string(),
+            port_flag, &llama_port.to_string(),
             "--host", "127.0.0.1",
         ])
         .stdout(Stdio::piped())

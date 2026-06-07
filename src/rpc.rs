@@ -135,7 +135,26 @@ pub async fn ensure_rpc_server() -> Result<PathBuf> {
 
 fn has_missing_libs(binary: &Path) -> bool {
     use std::process::Command;
-    if let Ok(output) = Command::new("ldd").arg(binary).output() {
+    let lib_dir = crate::config::data_dir().join("lib");
+    let mut ld_path = lib_dir.to_string_lossy().to_string();
+    for dir in &[
+        "/usr/local/cuda/lib64",
+        "/usr/local/cuda/lib",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib",
+        "/lib/x86_64-linux-gnu",
+        "/lib64",
+        "/usr/local/lib",
+    ] {
+        if std::path::Path::new(dir).exists() {
+            ld_path.push_str(&format!(":{}", dir));
+        }
+    }
+    if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+        ld_path.push_str(&format!(":{}", existing));
+    }
+    if let Ok(output) = Command::new("ldd").arg(binary).env("LD_LIBRARY_PATH", &ld_path).output() {
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             if line.trim().contains("not found") {
                 return true;
@@ -323,11 +342,14 @@ pub async fn ensure_llama_server() -> Result<PathBuf> {
         return Ok(path);
     }
 
-    // Always build from source on Linux to ensure GPU compatibility
     #[cfg(target_os = "linux")]
     {
-        println!("Building llama-server from source (ensures GPU compatibility)...");
-        if let Ok(_) = crate::build::build_from_source() {
+        if let Ok(built) = crate::build::build_from_source() {
+            let _ = built;
+            if path.exists() && !has_missing_libs(&path) {
+                println!("llama-server available from source build");
+                return Ok(path);
+            }
             for search_dir in &[
                 crate::build::source_dir().join("build").join("bin"),
                 crate::build::source_dir().join("build"),
@@ -450,12 +472,26 @@ pub async fn ensure_llama_server() -> Result<PathBuf> {
     Ok(dest.clone())
 }
 
+pub fn llama_server_port_flag(binary: &Path) -> &'static str {
+    if let Ok(output) = std::process::Command::new(binary)
+        .arg("--help")
+        .output()
+    {
+        let help = String::from_utf8_lossy(&output.stdout);
+        if help.contains("--port") {
+            return "--port";
+        }
+    }
+    "-p"
+}
+
 pub fn spawn_llama_server(binary: &Path, model_path: &str, n_gpu_layers: i32, port: u16) -> Result<std::process::Child> {
+    let port_flag = llama_server_port_flag(binary);
     let mut cmd = std::process::Command::new(binary);
     cmd.arg("-m").arg(model_path)
        .arg("-c").arg("4096")
        .arg("-ngl").arg(n_gpu_layers.to_string())
-       .arg("--port").arg(port.to_string())
+       .arg(port_flag).arg(port.to_string())
        .arg("--host").arg("0.0.0.0");
 
     #[cfg(target_os = "linux")]
@@ -472,6 +508,8 @@ pub fn spawn_llama_server(binary: &Path, model_path: &str, n_gpu_layers: i32, po
             "/lib/x86_64-linux-gnu",
             "/lib64",
             "/usr/local/lib",
+            "/usr/lib/x86_64-linux-gnu/dri",
+            "/usr/lib/x86_64-linux-gnu/vulkan",
         ] {
             if std::path::Path::new(dir).exists() {
                 ld_path.push_str(&format!(":{}", dir));
