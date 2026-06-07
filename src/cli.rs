@@ -239,9 +239,10 @@ mod handlers {
         let hub_vpn_addr = json["hub_vpn_addr"].as_str()
             .ok_or_else(|| anyhow::anyhow!("missing hub_vpn_addr in response"))?;
 
-        // Write WireGuard config (modify for full tunnel so DNS works)
+        // Write WireGuard config (split tunnel — only VPN traffic)
+        // Model downloads go through hub's /model/download proxy over VPN
         let config_text = config_text
-            .replace("AllowedIPs = 10.8.0.0/24", "AllowedIPs = 0.0.0.0/0, ::/0")
+            .replace("AllowedIPs = 0.0.0.0/0, ::/0", "AllowedIPs = 10.8.0.0/24")
             .replace("PersistentKeepalive = 0", "PersistentKeepalive = 25");
         std::fs::write(&wg_conf, &config_text)?;
         println!("  VPN:    config written to {}", wg_conf.display());

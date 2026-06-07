@@ -344,6 +344,7 @@ pub struct PipelineState {
     pub model_url: String,
     pub llama_server_started: bool,
     pub rpc_server_started: bool,
+    pub last_pipeline_id: Option<String>,
 }
 
 impl PipelineState {
@@ -357,12 +358,13 @@ impl PipelineState {
             last_hop_connected: false,
             next_hop_connected: false,
             is_first: false,
-            is_last: false,
+            is_last: true,
             next_hop_stream: None,
             model_name: String::new(),
             model_url: String::new(),
             llama_server_started: false,
             rpc_server_started: false,
+            last_pipeline_id: None,
         }
     }
 }
@@ -469,9 +471,22 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
 
                                     match msg {
                                         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
+                                            // Skip duplicate HeartbeatForward (same pipeline_id)
+                                            {
+                                                let pipeline_guard = pipeline.read().await;
+                                                if pipeline_guard.last_pipeline_id.as_deref() == Some(&pipeline_info.pipeline_id) {
+                                                    continue;
+                                                }
+                                            }
+
                                             info!("[<- hub] HeartbeatForward: pipeline_id={}, {} workers, model={}", 
                                                 pipeline_info.pipeline_id, pipeline_info.workers.len(), pipeline_info.model_name);
                                             
+                                            {
+                                                let mut pipeline_guard = pipeline.write().await;
+                                                pipeline_guard.last_pipeline_id = Some(pipeline_info.pipeline_id.clone());
+                                            }
+
                                             let pipeline_owned = pipeline_info.clone();
                                             let my_id = &config.worker_id;
                                             if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| &w.worker_id == my_id) {

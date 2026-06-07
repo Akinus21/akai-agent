@@ -361,16 +361,6 @@ pub async fn download_latest() -> Result<()> {
                     println!("Extracted shared lib: {}", lib_name);
                 }
             }
-                } else if entry_type.is_file() {
-                    if let Ok(Some(link_target)) = entry.link_name() {
-                        let _ = std::fs::remove_file(&lib_dest);
-                        let _ = std::os::unix::fs::symlink(&link_target, &lib_dest);
-                    } else {
-                        let mut out = std::fs::File::create(&lib_dest)?;
-                        std::io::copy(&mut entry, &mut out)?;
-                    }
-                }
-            }
         }
 
         // Create symlinks after all files are extracted
