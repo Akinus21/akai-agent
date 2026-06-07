@@ -11,6 +11,28 @@ fn notify(title: &str, body: &str) {
         .output();
 }
 
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
+fn file_sha256(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => sha2::Digest::update(&mut hasher, &buf[..n]),
+            Err(_) => return None,
+        }
+    }
+    Some(format!("{:x}", sha2::Digest::finalize(hasher)))
+}
+
 fn setup_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         error!("PANIC in spawned task: {}", info);
@@ -96,6 +118,8 @@ pub struct HeartbeatResponse {
     pub reassign: bool,
     pub model_name: String,
     pub model_url: String,
+    #[serde(default)]
+    pub model_hash: String,
     #[serde(default)]
     pub pipeline: Option<PipelineInfo>,
 }
@@ -358,6 +382,7 @@ pub struct PipelineState {
     pub next_hop_stream: Option<Arc<Mutex<TcpStream>>>,
     pub model_name: String,
     pub model_url: String,
+    pub model_hash: String,
     pub llama_server_started: bool,
     pub rpc_server_started: bool,
     pub setup_started: bool,
@@ -379,6 +404,7 @@ impl PipelineState {
             next_hop_stream: None,
             model_name: String::new(),
             model_url: String::new(),
+            model_hash: String::new(),
             llama_server_started: false,
             rpc_server_started: false,
             setup_started: false,
@@ -580,10 +606,13 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                 pipeline_guard.num_layers = resp.num_layers;
                                             }
 
-                                            let model_changed = !resp.model_name.is_empty() && (resp.model_name != pipeline_guard.model_name || resp.model_url != pipeline_guard.model_url);
+                                            let model_changed = !resp.model_name.is_empty() && (resp.model_name != pipeline_guard.model_name || resp.model_url != pipeline_guard.model_url || (!resp.model_hash.is_empty() && resp.model_hash != pipeline_guard.model_hash));
                                             if model_changed {
                                                 pipeline_guard.model_name = resp.model_name.clone();
                                                 pipeline_guard.model_url = resp.model_url.clone();
+                                            }
+                                            if !resp.model_hash.is_empty() {
+                                                pipeline_guard.model_hash = resp.model_hash.clone();
                                             }
 
                                             if let Some(pl) = resp.pipeline {
@@ -635,13 +664,19 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                         let has_gpu = config.has_gpu;
                                                         let llama_port = config.llama_port;
                                                         let pipeline_clone = pipeline.clone();
+                                                        let model_hash_clone = pipeline_guard.model_hash.clone();
                                                         let llama_child_clone = llama_child.clone();
 
                                                         tokio::spawn(async move {
                                                             let model_path = crate::config::data_dir().join("model.gguf");
-                                                            let model_changed = true; // first time setup
+                                                            let local_hash = file_sha256(&model_path);
+                                                            let need_download = model_path.exists()
+                                                                && !local_hash.as_ref().map_or(false, |h| !model_hash_clone.is_empty() && h == &model_hash_clone)
+                                                                || !model_path.exists();
+                                                            let model_changed = !model_path.exists()
+                                                                || local_hash.as_ref().map_or(true, |h| !model_hash_clone.is_empty() && h != &model_hash_clone);
 
-                                                            if model_changed || !model_path.exists() {
+                                                            if model_changed || need_download {
                                                                 // Kill existing llama-server if running
                                                                 {
                                                                     let mut llama_guard = llama_child_clone.lock().await;

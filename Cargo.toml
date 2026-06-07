@@ -30,6 +30,7 @@ ed25519-dalek      = { version = "2", features = ["rand_core"] }
 rand               = "0.8"
 base64             = "0.22"
 futures-util       = "0.3"
+sha2               = "0.10"
 tokio-rustls       = "0.26"
 rustls             = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile     = "2"
