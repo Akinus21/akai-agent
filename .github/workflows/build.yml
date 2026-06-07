@@ -98,7 +98,7 @@ jobs:
             --data-binary @/tmp/webhook-payload.json \
             "https://webhook.akinus21.com/webhook/akai-net-build" || true
 
-   release:
+  release:
     needs: [build]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest

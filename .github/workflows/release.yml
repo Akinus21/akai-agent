@@ -77,7 +77,7 @@ jobs:
             --data-binary @/tmp/webhook-payload.json \
             "https://webhook.akinus21.com/webhook/akai-net-build" || true
 
-   build-rpc-vulkan:
+  build-rpc-vulkan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
