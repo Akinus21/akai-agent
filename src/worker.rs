@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+
+fn notify(title: &str, body: &str) {
+    info!("[notify] {}: {}", title, body);
+    let _ = Command::new("notify-send")
+        .args([&title, body])
+        .output();
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, TcpListener};
 use tokio::sync::{Mutex, RwLock};
@@ -592,14 +599,24 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                         let rpc_path = crate::rpc::rpc_binary_path();
                                                         if !rpc_path.exists() {
                                                             info!("Downloading rpc-server...");
-                                                            crate::rpc::ensure_rpc_server().await
-                                                                .context("Failed to download rpc-server")?;
+                                                            if let Err(e) = crate::rpc::ensure_rpc_server().await {
+                                                                error!("Failed to download rpc-server: {}", e);
+                                                                notify("akai-agent", &format!("Failed to download rpc-server: {}", e));
+                                                            }
                                                         }
 
-                                                        let child = crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port + 1)?;
-                                                        rpc_child.lock().await.replace(child);
-                                                        info!("rpc-server started on port {}", config.rpc_port + 1);
-                                                        pipeline_guard.rpc_server_started = true;
+                                                        match crate::rpc::spawn_rpc_server(&rpc_path, config.rpc_port + 1) {
+                                                            Ok(child) => {
+                                                                rpc_child.lock().await.replace(child);
+                                                                info!("rpc-server started on port {}", config.rpc_port + 1);
+                                                                pipeline_guard.rpc_server_started = true;
+                                                                notify("akai-agent", &format!("rpc-server ready (layers {}-{})", pipeline_guard.layer_offset, pipeline_guard.layer_offset + pipeline_guard.num_layers));
+                                                            }
+                                                            Err(e) => {
+                                                                error!("Failed to spawn rpc-server: {}", e);
+                                                                notify("akai-agent", &format!("Failed to start rpc-server: {}", e));
+                                                            }
+                                                        }
                                                     }
 
                                                     // First worker: spawn background task for model download + llama-server start
@@ -635,6 +652,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                     std::fs::remove_file(&model_path).ok();
                                                                 }
                                                                 info!("Downloading model from {}...", model_url);
+                                                                notify("akai-agent", &format!("Downloading model: {}", model_name));
                                                                 let client = Client::new();
                                                                 match client.get(&model_url)
                                                                     .timeout(std::time::Duration::from_secs(600))
@@ -660,6 +678,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                                     Ok(c) => c,
                                                                                     Err(e) => {
                                                                                         error!("Model download stream error: {}", e);
+                                                                                        notify("akai-agent", &format!("Model download failed: stream error"));
                                                                                         break;
                                                                                     }
                                                                                 };
@@ -677,11 +696,16 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                             file.flush().unwrap();
                                                                             drop(file);
                                                                             info!("Model downloaded to {:?} ({:.1} MB)", model_path, downloaded as f64 / 1_048_576.0);
+                                                                            notify("akai-agent", &format!("Model downloaded ({:.1} MB)", downloaded as f64 / 1_048_576.0));
                                                                         } else {
                                                                             error!("Model download failed with status: {}", resp.status());
+                                                                            notify("akai-agent", &format!("Model download failed: HTTP {}", resp.status()));
                                                                         }
                                                                     }
-                                                                    Err(e) => error!("Model download request failed: {}", e),
+                                                                    Err(e) => {
+                                                                        error!("Model download request failed: {}", e);
+                                                                        notify("akai-agent", &format!("Model download failed: {}", e));
+                                                                    }
                                                                 }
                                                             }
                                                             // Start llama-server if model exists
@@ -696,13 +720,22 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                                     info!("llama-server started on port {}", llama_port);
                                                                                     llama_child_clone.lock().await.replace(llama_cmd);
                                                                                     pipeline_guard.llama_server_started = true;
+                                                                                    drop(pipeline_guard);
+                                                                                    notify("akai-agent", &format!("{} ready for inference on port {}", model_name, llama_port));
                                                                                 }
-                                                                                Err(e) => error!("Failed to spawn llama-server: {}", e),
+                                                                                Err(e) => {
+                                                                                    error!("Failed to spawn llama-server: {}", e);
+                                                                                    drop(pipeline_guard);
+                                                                                    notify("akai-agent", &format!("Failed to start llama-server: {}", e));
+                                                                                }
                                                                             }
                                                                         }
-                                                                        Err(e) => error!("Failed to ensure llama-server: {}", e),
+                                                                        Err(e) => {
+                                                                            error!("Failed to ensure llama-server: {}", e);
+                                                                            drop(pipeline_guard);
+                                                                            notify("akai-agent", &format!("Failed to find llama-server: {}", e));
+                                                                        }
                                                                     }
-                                                                    drop(pipeline_guard);
                                                                 }
                                                             }
                                                             info!("Background setup task complete");
