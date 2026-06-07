@@ -244,7 +244,8 @@ mod handlers {
         let config_text = config_text
             .replace("AllowedIPs = 0.0.0.0/0, ::/0", "AllowedIPs = 10.8.0.0/24")
             .replace("PersistentKeepalive = 0", "PersistentKeepalive = 25");
-        std::fs::write(&wg_conf, &config_text)?;
+        let wg_conf = std::path::Path::new("/etc/wireguard/wg0.conf");
+        std::fs::write(wg_conf, &config_text)?;
         println!("  VPN:    config written to {}", wg_conf.display());
 
         // Bring up WireGuard

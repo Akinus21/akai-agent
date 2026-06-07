@@ -346,7 +346,7 @@ pub async fn download_latest() -> Result<()> {
                 let lib_dir = crate::config::data_dir().join("lib");
                 std::fs::create_dir_all(&lib_dir).ok();
                 let lib_name = std::path::Path::new(&name)
-                    .file_name().unwrap_or_default();
+                    .file_name().unwrap_or_default().to_string_lossy().to_string();
                 let lib_dest = lib_dir.join(&lib_name);
                 let entry_type = entry.header().entry_type();
                 if entry_type.is_symlink() {
