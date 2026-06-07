@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use flate2::read::GzDecoder;
 
 const GITHUB_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
-const SELF_REPO: &str = "Akinus21/akai-agent";
 const USER_AGENT: &str = concat!("akai-agent/", env!("CARGO_PKG_VERSION"));
 
 pub fn binary_name() -> &'static str {
@@ -20,13 +19,6 @@ pub fn rpc_binary_path() -> PathBuf {
 
 pub fn llama_server_path() -> PathBuf {
     crate::config::data_dir().join(llama_server_name())
-}
-
-fn rpc_cuda_asset_name() -> Option<String> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Some("akai-agent-rpc-cuda-linux-x86_64.tar.gz".to_string()),
-        _ => None,
-    }
 }
 
 fn asset_pattern() -> &'static str {
@@ -73,11 +65,6 @@ async fn fetch_latest_release() -> Result<serde_json::Value> {
     fetch_json(GITHUB_API).await
 }
 
-async fn fetch_self_latest_release() -> Result<serde_json::Value> {
-    let url = format!("https://api.github.com/repos/{}/releases/latest", SELF_REPO);
-    fetch_json(&url).await
-}
-
 pub async fn needs_update(current_version: &str) -> Result<bool> {
     let release = fetch_latest_release().await?;
     let latest = release["tag_name"].as_str()
@@ -121,67 +108,25 @@ pub async fn ensure_rpc_server() -> Result<PathBuf> {
         return Ok(path);
     }
 
+    // Always build from source on Linux to guarantee GPU compatibility
     #[cfg(target_os = "linux")]
-    let needs_build = crate::build::needs_source_build();
-    #[cfg(not(target_os = "linux"))]
-    let needs_build = false;
+    {
+        println!("Building rpc-server from source (ensures GPU compatibility)...");
+        if lib_dir.exists() {
+            std::fs::remove_dir_all(&lib_dir).ok();
+        }
+        std::fs::remove_file(&path).ok();
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::create_dir_all(&lib_dir)?;
 
-    if needs_build {
-        let has_cuda = crate::build::has_cuda();
-        let is_vulkan = !has_cuda && crate::build::has_vulkan();
-
-        if is_vulkan {
-            println!("Vulkan GPU detected — building rpc-server with Vulkan support...");
-            if lib_dir.exists() {
-                std::fs::remove_dir_all(&lib_dir).ok();
-            }
-            std::fs::remove_file(&path).ok();
-            std::fs::create_dir_all(path.parent().unwrap())?;
-            std::fs::create_dir_all(&lib_dir)?;
-
-            match crate::build::build_from_source() {
-                Ok(p) => return Ok(p),
-                Err(e) => eprintln!("Vulkan source build failed: {}. Trying CPU fallback.", e),
-            }
-
-            println!("Falling back to CPU-only rpc-server...");
-        } else {
-            println!("GPU detected — building rpc-server with CUDA support...");
-            if lib_dir.exists() {
-                std::fs::remove_dir_all(&lib_dir).ok();
-            }
-            std::fs::remove_file(&path).ok();
-            std::fs::create_dir_all(path.parent().unwrap())?;
-            std::fs::create_dir_all(&lib_dir)?;
-
-            match crate::build::build_from_source() {
-                Ok(p) => return Ok(p),
-                Err(e) => eprintln!("Source build failed: {}. Trying pre-built CUDA bundle.", e),
-            }
-
-            match download_cuda_bundle().await {
-                Ok(()) => {
-                    if path.exists() {
-                        return Ok(path);
-                    }
-                }
-                Err(e) => eprintln!("Pre-built CUDA bundle download failed: {}. Falling back to CPU.", e),
-            }
+        match crate::build::build_from_source() {
+            Ok(p) => return Ok(p),
+            Err(e) => eprintln!("Source build failed: {}. Trying pre-built download.", e),
         }
     }
 
     if !path.exists() || has_missing_libs(&path) {
         std::fs::create_dir_all(path.parent().unwrap())?;
-
-        if crate::build::has_cuda() || crate::build::has_vulkan() {
-            std::fs::remove_dir_all(&lib_dir).ok();
-            std::fs::create_dir_all(&lib_dir).ok();
-            if let Ok(p) = crate::build::build_from_source() {
-                return Ok(p);
-            }
-            eprintln!("  Source build failed — trying pre-built...");
-        }
-
         download_latest().await?;
     }
 
@@ -198,95 +143,6 @@ fn has_missing_libs(binary: &Path) -> bool {
         }
     }
     false
-}
-
-async fn download_cuda_bundle() -> Result<()> {
-    let asset_name = rpc_cuda_asset_name()
-        .ok_or_else(|| anyhow!("No pre-built CUDA bundle for this platform"))?;
-
-    let dest = rpc_binary_path();
-    let lib_dir = crate::config::data_dir().join("lib");
-
-    println!("  Looking for pre-built CUDA bundle: {}...", asset_name);
-
-    let release = fetch_self_latest_release().await?;
-    let assets = release["assets"].as_array()
-        .ok_or_else(|| anyhow!("no assets in release"))?;
-
-    let asset = assets.iter()
-        .find(|a| a["name"].as_str() == Some(&asset_name))
-        .ok_or_else(|| anyhow!("Pre-built CUDA bundle '{}' not found in latest release", asset_name))?;
-
-    let url = asset["browser_download_url"].as_str()
-        .ok_or_else(|| anyhow!("missing download URL"))?;
-
-    println!("  Downloading pre-built CUDA bundle: {}", asset_name);
-
-    let client = reqwest::Client::new();
-    let bytes = client.get(url)
-        .header("User-Agent", USER_AGENT)
-        .send().await?
-        .bytes().await?;
-
-    std::fs::create_dir_all(dest.parent().unwrap())?;
-    std::fs::create_dir_all(&lib_dir)?;
-
-    let decoder = GzDecoder::new(bytes.as_ref());
-    let mut archive = tar::Archive::new(decoder);
-
-    let mut found_binary = false;
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let name = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-        let fname = std::path::Path::new(&name)
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        if fname == "rpc-server" || fname == "llama-rpc-server" {
-            entry.unpack(&dest)?;
-            found_binary = true;
-        }
-
-        if fname.ends_with(".so") || fname.contains(".so.") {
-            let entry_type = entry.header().entry_type();
-            if entry_type.is_symlink() {
-                if let Ok(Some(link_target)) = entry.link_name() {
-                    let link_name = link_target.to_string_lossy();
-                    let _ = std::os::unix::fs::symlink(&*link_name, lib_dir.join(&fname));
-                }
-            } else if entry_type.is_file() {
-                if let Ok(Some(link_target)) = entry.link_name() {
-                    let link_name = link_target.to_string_lossy();
-                    let _ = std::os::unix::fs::symlink(&*link_name, lib_dir.join(&fname));
-                } else {
-                    let lib_dest = lib_dir.join(&fname);
-                    let mut out = std::fs::File::create(&lib_dest)?;
-                    std::io::copy(&mut entry, &mut out)?;
-                }
-            }
-        }
-    }
-
-    if !found_binary {
-        bail!("rpc-server binary not found in CUDA bundle");
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
-    }
-
-    let tag = release["tag_name"].as_str().unwrap_or("unknown");
-    if let Ok(mut cfg) = crate::config::load_config() {
-        cfg.rpc_version = format!("{}+cuda", tag);
-        cfg.rpc_binary = dest.to_string_lossy().to_string();
-        let _ = crate::config::save_config(&cfg);
-    }
-
-    println!("  Pre-built CUDA rpc-server installed ({})", tag);
-    Ok(())
 }
 
 pub async fn download_latest() -> Result<()> {
@@ -467,11 +323,35 @@ pub async fn ensure_llama_server() -> Result<PathBuf> {
         return Ok(path);
     }
 
-    if path.exists() && has_missing_libs(&path) {
-        println!("llama-server exists but has missing shared libs, re-downloading...");
-    } else {
-        println!("Downloading llama-server...");
+    // Always build from source on Linux to ensure GPU compatibility
+    #[cfg(target_os = "linux")]
+    {
+        println!("Building llama-server from source (ensures GPU compatibility)...");
+        if let Ok(_) = crate::build::build_from_source() {
+            for search_dir in &[
+                crate::build::source_dir().join("build").join("bin"),
+                crate::build::source_dir().join("build"),
+            ] {
+                let llama_src = search_dir.join("llama-server");
+                if llama_src.exists() {
+                    std::fs::copy(&llama_src, &path)?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+                    }
+                    println!("llama-server copied from source build");
+                    return Ok(path);
+                }
+            }
+            eprintln!("llama-server not found in source build, downloading pre-built...");
+        } else {
+            eprintln!("Source build failed, downloading pre-built llama-server...");
+        }
     }
+
+    println!("Downloading llama-server...");
+
     let release = fetch_latest_release().await?;
     let tag = release["tag_name"].as_str().unwrap_or("latest");
     let assets = release["assets"].as_array()
@@ -576,7 +456,7 @@ pub fn spawn_llama_server(binary: &Path, model_path: &str, n_gpu_layers: i32, po
        .arg("-c").arg("4096")
        .arg("-ngl").arg(n_gpu_layers.to_string())
        .arg("--port").arg(port.to_string())
-       .arg("--host").arg("127.0.0.1");
+       .arg("--host").arg("0.0.0.0");
 
     #[cfg(target_os = "linux")]
     {

@@ -15,7 +15,7 @@ fn data_dir() -> PathBuf {
     crate::config::data_dir()
 }
 
-fn source_dir() -> PathBuf {
+pub fn source_dir() -> PathBuf {
     data_dir().join("llama.cpp")
 }
 
@@ -546,7 +546,8 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
          cmake .. -DCMAKE_BUILD_TYPE=Release {cmake_args} && \
          cmake --build . --config Release -j$(nproc) && \
          cp '{src}/build/bin/rpc-server' '{data}/rpc-server' 2>/dev/null || \
-         cp '{src}/build/bin/llama-rpc-server' '{data}/rpc-server' 2>/dev/null || true && \
+         cp '{src}/build/bin/llama-rpc-server' '{data}/rpc-server' 2>/dev/null; \
+         cp '{src}/build/bin/llama-server' '{data}/llama-server' 2>/dev/null || true && \
          mkdir -p '{data}/lib' && \
          {lib_copy}",
         cuda_setup = cuda_path_setup,
@@ -569,10 +570,15 @@ pub fn build_in_distrobox() -> Result<PathBuf> {
         bail!("Built binary not found at {}", eff_bin.display());
     }
 
+    let eff_llama = eff_data.join("llama-server");
+
     if eff_data != data_dir() {
         std::fs::create_dir_all(&data_dir())?;
         let target = data_dir().join("rpc-server");
         std::fs::copy(&eff_bin, &target)?;
+        if eff_llama.exists() {
+            std::fs::copy(&eff_llama, data_dir().join("llama-server"))?;
+        }
         let eff_lib = eff_data.join("lib");
         let target_lib = data_dir().join("lib");
         std::fs::create_dir_all(&target_lib)?;
@@ -904,6 +910,22 @@ pub fn build_from_source() -> Result<PathBuf> {
 
     println!("  Copying binary to {}", bin.display());
     std::fs::copy(&built_bin, &bin)?;
+
+    // Also copy llama-server if it was built
+    for search_dir in &[&bin_dir, &build] {
+        let llama_src = search_dir.join("llama-server");
+        if llama_src.exists() {
+            let llama_dest = data_dir().join("llama-server");
+            println!("  Copying llama-server to {}", llama_dest.display());
+            std::fs::copy(&llama_src, &llama_dest)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&llama_dest, std::fs::Permissions::from_mode(0o755))?;
+            }
+            break;
+        }
+    }
 
     #[cfg(unix)]
     {
