@@ -200,14 +200,26 @@ mod handlers {
             anyhow::bail!("Cannot enroll VPN without hub API URL");
         } else {
             println!("  VPN:    not connected, enrolling via {}...", cfg.hub_api_url);
-            match enroll_vpn(&cfg.hub_api_url, &cfg.worker_id, &cfg.username).await {
-                Ok(vpn_addr) => {
-                    println!("  VPN:    enrolled, hub at {}", vpn_addr);
-                    vpn_addr
+            let mut vpn_addr = None;
+            for attempt in 1..=20 {
+                match enroll_vpn(&cfg.hub_api_url, &cfg.worker_id, &cfg.username).await {
+                    Ok(addr) => {
+                        println!("  VPN:    enrolled, hub at {}", addr);
+                        vpn_addr = Some(addr);
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("VPN enrollment attempt {}/20 failed: {}", attempt, e);
+                        if attempt < 20 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    }
                 }
-                Err(e) => {
-                    eprintln!("VPN enrollment failed: {}", e);
-                    eprintln!("Falling back to direct connection to {}", hub_addr);
+            }
+            match vpn_addr {
+                Some(addr) => addr,
+                None => {
+                    eprintln!("All 20 VPN enrollment attempts failed, falling back to direct connection to {}", hub_addr);
                     hub_addr.clone()
                 }
             }
