@@ -239,11 +239,11 @@ mod handlers {
         let hub_vpn_addr = json["hub_vpn_addr"].as_str()
             .ok_or_else(|| anyhow::anyhow!("missing hub_vpn_addr in response"))?;
 
-        // Write WireGuard config
-        let wg_dir = std::path::Path::new("/etc/wireguard");
-        std::fs::create_dir_all(wg_dir)?;
-        let wg_conf = wg_dir.join("wg0.conf");
-        std::fs::write(&wg_conf, config_text)?;
+        // Write WireGuard config (modify for full tunnel so DNS works)
+        let config_text = config_text
+            .replace("AllowedIPs = 10.8.0.0/24", "AllowedIPs = 0.0.0.0/0, ::/0")
+            .replace("PersistentKeepalive = 0", "PersistentKeepalive = 25");
+        std::fs::write(&wg_conf, &config_text)?;
         println!("  VPN:    config written to {}", wg_conf.display());
 
         // Bring up WireGuard

@@ -329,6 +329,7 @@ pub async fn download_latest() -> Result<()> {
     if is_gz {
         let decoder = GzDecoder::new(bytes.as_ref());
         let mut archive = tar::Archive::new(decoder);
+        let mut pending_symlinks: Vec<(std::path::PathBuf, String)> = Vec::new();
 
         let mut found = false;
         for entry in archive.entries()? {
@@ -349,10 +350,17 @@ pub async fn download_latest() -> Result<()> {
                 let lib_dest = lib_dir.join(&lib_name);
                 let entry_type = entry.header().entry_type();
                 if entry_type.is_symlink() {
+                    // Store symlinks for later creation
                     if let Ok(Some(link_target)) = entry.link_name() {
-                        let _ = std::fs::remove_file(&lib_dest);
-                        let _ = std::os::unix::fs::symlink(&link_target, &lib_dest);
+                        let link_target_str = link_target.to_string_lossy().to_string();
+                        pending_symlinks.push((lib_dest, link_target_str));
                     }
+                } else if entry_type.is_file() {
+                    let mut out = std::fs::File::create(&lib_dest)?;
+                    std::io::copy(&mut entry, &mut out)?;
+                    println!("Extracted shared lib: {}", lib_name);
+                }
+            }
                 } else if entry_type.is_file() {
                     if let Ok(Some(link_target)) = entry.link_name() {
                         let _ = std::fs::remove_file(&lib_dest);
@@ -362,6 +370,14 @@ pub async fn download_latest() -> Result<()> {
                         std::io::copy(&mut entry, &mut out)?;
                     }
                 }
+            }
+        }
+
+        // Create symlinks after all files are extracted
+        for (dest, target) in &pending_symlinks {
+            let _ = std::fs::remove_file(dest);
+            if let Err(e) = std::os::unix::fs::symlink(target, dest) {
+                eprintln!("Warning: failed to create symlink: {}", e);
             }
         }
 
@@ -516,6 +532,7 @@ pub async fn ensure_llama_server() -> Result<PathBuf> {
         let mut found = false;
         let lib_dir = crate::config::data_dir().join("lib");
         std::fs::create_dir_all(&lib_dir)?;
+        let mut pending_symlinks: Vec<(std::path::PathBuf, String)> = Vec::new();
         for entry in archive.entries()? {
             let mut entry = entry?;
             let name = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
@@ -527,21 +544,27 @@ pub async fn ensure_llama_server() -> Result<PathBuf> {
                 let lib_name = entry.path().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).unwrap_or_default();
                 if !lib_name.is_empty() {
                     let lib_dest = lib_dir.join(&lib_name);
-                    if let Ok(Some(link_name)) = entry.link_name() {
-                        let link_target = link_name.to_string_lossy().to_string();
-                        // Remove existing file/symlink first
-                        std::fs::remove_file(&lib_dest).ok();
-                        if std::os::unix::fs::symlink(&link_target, &lib_dest).is_ok() {
-                            println!("Extracted symlink: {} -> {}", lib_name, link_target);
+                    let entry_type = entry.header().entry_type();
+                    if entry_type.is_symlink() {
+                        if let Ok(Some(link_target)) = entry.link_name() {
+                            pending_symlinks.push((lib_dest, link_target.to_string_lossy().to_string()));
                         }
-                    } else {
+                    } else if entry_type.is_file() {
                         let mut out = std::fs::File::create(&lib_dest)?;
                         std::io::copy(&mut entry, &mut out)?;
-                        println!("Extracted shared lib: {}", lib_name);
                     }
                 }
             }
         }
+
+        // Create symlinks after all files are extracted
+        for (dest, target) in &pending_symlinks {
+            let _ = std::fs::remove_file(dest);
+            if let Err(e) = std::os::unix::fs::symlink(target, dest) {
+                eprintln!("Warning: failed to create symlink: {}", e);
+            }
+        }
+
         if !found {
             bail!("llama-server binary not found in downloaded tarball");
         }
