@@ -1,4 +1,4 @@
-use anyhow::{Result, Context};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -19,14 +19,15 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 fn file_sha256(path: &std::path::Path) -> Option<String> {
+    use sha2::{Sha256, Digest};
     use std::io::Read;
     let mut file = std::fs::File::open(path).ok()?;
-    let mut hasher = sha2::Sha256::new();
+    let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
     loop {
         match file.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => sha2::Digest::update(&mut hasher, &buf[..n]),
+            Ok(n) => Digest::update(&mut hasher, &buf[..n]),
             Err(_) => return None,
         }
     }
