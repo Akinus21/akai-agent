@@ -69,7 +69,7 @@ jobs:
             --arg actor   "${{ github.actor }}" \
             '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,error:[inputs]|join("\n")}')" > /tmp/webhook-payload.json
           SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/webhook-payload.json | awk '{print "sha256="$2}')
-          curl -fsSL -X POST \
+          curl -fsSL --retry 3 --retry-delay 5 -X POST \
             -H "Content-Type: application/json" \
             -H "X-GitHub-Event: build_failure" \
             -H "X-Hub-Signature-256: $SIG" \
@@ -91,14 +91,14 @@ jobs:
             --arg actor  "${{ github.actor }}" \
             '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor}')" > /tmp/webhook-payload.json
           SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/webhook-payload.json | awk '{print "sha256="$2}')
-          curl -fsSL -X POST \
+          curl -fsSL --retry 3 --retry-delay 5 -X POST \
             -H "Content-Type: application/json" \
             -H "X-GitHub-Event: build_success" \
             -H "X-Hub-Signature-256: $SIG" \
             --data-binary @/tmp/webhook-payload.json \
-            "https://webhook.akinus21.com/webhook/akai-net-build"
+            "https://webhook.akinus21.com/webhook/akai-net-build" || true
 
-  release:
+   release:
     needs: [build]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -231,7 +231,7 @@ jobs:
             --arg actor   "${{ github.actor }}" \
             '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,error:[inputs]|join("\n")}')" > /tmp/webhook-payload.json
           SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/webhook-payload.json | awk '{print "sha256="$2}')
-          curl -fsSL -X POST \
+          curl -fsSL --retry 3 --retry-delay 5 -X POST \
             -H "Content-Type: application/json" \
             -H "X-GitHub-Event: build_failure" \
             -H "X-Hub-Signature-256: $SIG" \
@@ -254,9 +254,9 @@ jobs:
             --arg tag    "$TAG" \
             '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,tag:$tag}')" > /tmp/webhook-payload.json
           SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/webhook-payload.json | awk '{print "sha256="$2}')
-          curl -fsSL -X POST \
+          curl -fsSL --retry 3 --retry-delay 5 -X POST \
             -H "Content-Type: application/json" \
             -H "X-GitHub-Event: build_success" \
             -H "X-Hub-Signature-256: $SIG" \
             --data-binary @/tmp/webhook-payload.json \
-            "https://webhook.akinus21.com/webhook/akai-net-build"
+            "https://webhook.akinus21.com/webhook/akai-net-build" || true
