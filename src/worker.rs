@@ -10,6 +10,12 @@ fn notify(title: &str, body: &str) {
         .args([&title, body])
         .output();
 }
+
+fn setup_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        error!("PANIC in spawned task: {}", info);
+    }));
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, TcpListener};
 use tokio::sync::{Mutex, RwLock};
@@ -382,6 +388,7 @@ impl PipelineState {
 }
 
 pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
+    setup_panic_hook();
     info!("Akai-Net Hub Worker starting...");
     info!("  Hub: {}", config.hub_addr);
     info!("  Worker ID: {}", config.worker_id);
@@ -669,7 +676,14 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                             if let Some(parent) = model_path.parent() {
                                                                                 std::fs::create_dir_all(parent).ok();
                                                                             }
-                                                                            let mut file = std::fs::File::create(&model_path).unwrap();
+                                                                            let mut file = match std::fs::File::create(&model_path) {
+                                                                                Ok(f) => f,
+                                                                                Err(e) => {
+                                                                                    error!("Failed to create model file: {}", e);
+                                                                                    notify("akai-agent", &format!("Model download failed: cannot create file"));
+                                                                                    return;
+                                                                                }
+                                                                            };
                                                                             let mut stream = resp.bytes_stream();
                                                                             use futures_util::StreamExt;
                                                                             use std::io::Write;
@@ -691,9 +705,15 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                                                         last_pct = pct;
                                                                                     }
                                                                                 }
-                                                                                file.write_all(&chunk).unwrap();
+                                                                                if let Err(e) = file.write_all(&chunk) {
+                                                                                    error!("Model write error: {}", e);
+                                                                                    notify("akai-agent", &format!("Model download failed: write error"));
+                                                                                    break;
+                                                                                }
                                                                             }
-                                                                            file.flush().unwrap();
+                                                                            if let Err(e) = file.flush() {
+                                                                                error!("Model flush error: {}", e);
+                                                                            }
                                                                             drop(file);
                                                                             info!("Model downloaded to {:?} ({:.1} MB)", model_path, downloaded as f64 / 1_048_576.0);
                                                                             notify("akai-agent", &format!("Model downloaded ({:.1} MB)", downloaded as f64 / 1_048_576.0));
