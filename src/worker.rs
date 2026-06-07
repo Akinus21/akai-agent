@@ -347,6 +347,7 @@ pub struct PipelineState {
     pub model_url: String,
     pub llama_server_started: bool,
     pub rpc_server_started: bool,
+    pub setup_started: bool,
     pub last_pipeline_id: Option<String>,
 }
 
@@ -367,6 +368,7 @@ impl PipelineState {
             model_url: String::new(),
             llama_server_started: false,
             rpc_server_started: false,
+            setup_started: false,
             last_pipeline_id: None,
         }
     }
@@ -600,90 +602,111 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                         pipeline_guard.rpc_server_started = true;
                                                     }
 
-                                                    // First worker: download model and start llama-server
-                                                    if pipeline_guard.is_first && !pipeline_guard.model_url.is_empty() {
-                                                        let model_path = crate::config::data_dir().join("model.gguf");
+                                                    // First worker: spawn background task for model download + llama-server start
+                                                    // This keeps the message loop responsive to heartbeats
+                                                    if pipeline_guard.is_first && !pipeline_guard.model_url.is_empty() && !pipeline_guard.setup_started {
+                                                        pipeline_guard.setup_started = true;
+                                                        let model_url = pipeline_guard.model_url.clone();
+                                                        let model_name = pipeline_guard.model_name.clone();
+                                                        let has_gpu = config.has_gpu;
+                                                        let llama_port = config.llama_port;
+                                                        let pipeline_clone = pipeline.clone();
+                                                        let llama_child_clone = llama_child.clone();
 
-                                                        if model_changed || !model_path.exists() {
-                                                            // Kill existing llama-server if running
-                                                            if pipeline_guard.llama_server_started {
-                                                                info!("Model changed, stopping llama-server");
-                                                                if let Some(mut old) = llama_child.lock().await.take() {
-                                                                    old.kill().ok();
-                                                                }
-                                                                pipeline_guard.llama_server_started = false;
-                                                            }
-                                                            // Delete old model and download new one
-                                                            if model_path.exists() {
-                                                                info!("Deleting old model file");
-                                                                std::fs::remove_file(&model_path).ok();
-                                                            }
-                                                            info!("Downloading model from {}...", pipeline_guard.model_url);
-                                                            let client = Client::new();
-                                                            match client.get(&pipeline_guard.model_url)
-                                                                .timeout(std::time::Duration::from_secs(600))
-                                                                .send().await
-                                                            {
-                                                                Ok(resp) => {
-                                                                    if resp.status().is_success() {
-                                                                        let total = resp.content_length().unwrap_or(0);
-                                                                        if total > 0 {
-                                                                            info!("Model size: {:.1} MB", total as f64 / 1_048_576.0);
-                                                                        }
-                                                                        let mut downloaded: u64 = 0;
-                                                                        let mut last_pct: u64 = 0;
-                                                                        if let Some(parent) = model_path.parent() {
-                                                                            std::fs::create_dir_all(parent).ok();
-                                                                        }
-                                                                        let mut file = std::fs::File::create(&model_path)?;
-                                                                        let mut stream = resp.bytes_stream();
-                                                                        use futures_util::StreamExt;
-                                                                        use std::io::Write;
-                                                                        while let Some(chunk) = stream.next().await {
-                                                                            let chunk = match chunk {
-                                                                                Ok(c) => c,
-                                                                                Err(e) => {
-                                                                                    error!("Model download stream error: {}", e);
-                                                                                    break;
-                                                                                }
-                                                                            };
-                                                                            downloaded += chunk.len() as u64;
-                                                                            if total > 0 {
-                                                                                let pct = downloaded * 100 / total;
-                                                                                if pct >= last_pct + 10 {
-                                                                                    info!("Model download: {}% ({:.1}/{:.1} MB)", 
-                                                                                        pct, downloaded as f64 / 1_048_576.0, total as f64 / 1_048_576.0);
-                                                                                    last_pct = pct;
-                                                                                }
-                                                                            }
-                                                                            file.write_all(&chunk)?;
-                                                                        }
-                                                                        file.flush()?;
-                                                                        drop(file);
-                                                                        info!("Model downloaded to {:?} ({:.1} MB)", model_path, downloaded as f64 / 1_048_576.0);
-                                                                    } else {
-                                                                        error!("Model download failed with status: {}", resp.status());
+                                                        tokio::spawn(async move {
+                                                            let model_path = crate::config::data_dir().join("model.gguf");
+                                                            let model_changed = true; // first time setup
+
+                                                            if model_changed || !model_path.exists() {
+                                                                // Kill existing llama-server if running
+                                                                {
+                                                                    let mut llama_guard = llama_child_clone.lock().await;
+                                                                    if let Some(mut old) = llama_guard.take() {
+                                                                        info!("Model changed, stopping llama-server");
+                                                                        old.kill().ok();
                                                                     }
                                                                 }
-                                                                Err(e) => error!("Model download request failed: {}", e),
+                                                                let mut pipeline_guard = pipeline_clone.write().await;
+                                                                pipeline_guard.llama_server_started = false;
+                                                                drop(pipeline_guard);
+
+                                                                if model_path.exists() {
+                                                                    info!("Deleting old model file");
+                                                                    std::fs::remove_file(&model_path).ok();
+                                                                }
+                                                                info!("Downloading model from {}...", model_url);
+                                                                let client = Client::new();
+                                                                match client.get(&model_url)
+                                                                    .timeout(std::time::Duration::from_secs(600))
+                                                                    .send().await
+                                                                {
+                                                                    Ok(resp) => {
+                                                                        if resp.status().is_success() {
+                                                                            let total = resp.content_length().unwrap_or(0);
+                                                                            if total > 0 {
+                                                                                info!("Model size: {:.1} MB", total as f64 / 1_048_576.0);
+                                                                            }
+                                                                            let mut downloaded: u64 = 0;
+                                                                            let mut last_pct: u64 = 0;
+                                                                            if let Some(parent) = model_path.parent() {
+                                                                                std::fs::create_dir_all(parent).ok();
+                                                                            }
+                                                                            let mut file = std::fs::File::create(&model_path).unwrap();
+                                                                            let mut stream = resp.bytes_stream();
+                                                                            use futures_util::StreamExt;
+                                                                            use std::io::Write;
+                                                                            while let Some(chunk) = stream.next().await {
+                                                                                let chunk = match chunk {
+                                                                                    Ok(c) => c,
+                                                                                    Err(e) => {
+                                                                                        error!("Model download stream error: {}", e);
+                                                                                        break;
+                                                                                    }
+                                                                                };
+                                                                                downloaded += chunk.len() as u64;
+                                                                                if total > 0 {
+                                                                                    let pct = downloaded * 100 / total;
+                                                                                    if pct >= last_pct + 10 {
+                                                                                        info!("Model download: {}% ({:.1}/{:.1} MB)", 
+                                                                                            pct, downloaded as f64 / 1_048_576.0, total as f64 / 1_048_576.0);
+                                                                                        last_pct = pct;
+                                                                                    }
+                                                                                }
+                                                                                file.write_all(&chunk).unwrap();
+                                                                            }
+                                                                            file.flush().unwrap();
+                                                                            drop(file);
+                                                                            info!("Model downloaded to {:?} ({:.1} MB)", model_path, downloaded as f64 / 1_048_576.0);
+                                                                        } else {
+                                                                            error!("Model download failed with status: {}", resp.status());
+                                                                        }
+                                                                    }
+                                                                    Err(e) => error!("Model download request failed: {}", e),
+                                                                }
                                                             }
-                                                        }
-                                                        // Start llama-server if model exists and not already running
-                                                        if model_path.exists() && !pipeline_guard.llama_server_started {
-                                                            let llama_path = crate::rpc::llama_server_path();
-                                                            crate::rpc::ensure_llama_server().await
-                                                                .context("Failed to ensure llama-server")?;
-                                                            let ngl = if config.has_gpu { -1 } else { 0 };
-                                                            let llama_cmd = crate::rpc::spawn_llama_server(
-                                                                &llama_path,
-                                                                &model_path.to_string_lossy(),
-                                                                ngl,
-                                                                config.llama_port,
-                                                            )?;
-                                                            info!("llama-server started on port {}", config.llama_port);
-                                                            llama_child.lock().await.replace(llama_cmd);
-                                                            pipeline_guard.llama_server_started = true;
-                                                        }
+                                                            // Start llama-server if model exists
+                                                            if model_path.exists() {
+                                                                let mut pipeline_guard = pipeline_clone.write().await;
+                                                                if !pipeline_guard.llama_server_started {
+                                                                    match crate::rpc::ensure_llama_server().await {
+                                                                        Ok(llama_path) => {
+                                                                            let ngl = if has_gpu { -1 } else { 0 };
+                                                                            match crate::rpc::spawn_llama_server(&llama_path, &model_path.to_string_lossy(), ngl, llama_port) {
+                                                                                Ok(llama_cmd) => {
+                                                                                    info!("llama-server started on port {}", llama_port);
+                                                                                    llama_child_clone.lock().await.replace(llama_cmd);
+                                                                                    pipeline_guard.llama_server_started = true;
+                                                                                }
+                                                                                Err(e) => error!("Failed to spawn llama-server: {}", e),
+                                                                            }
+                                                                        }
+                                                                        Err(e) => error!("Failed to ensure llama-server: {}", e),
+                                                                    }
+                                                                    drop(pipeline_guard);
+                                                                }
+                                                            }
+                                                            info!("Background setup task complete");
+                                                        });
                                                     }
                                                 }
                                             }
