@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
