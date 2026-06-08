@@ -189,11 +189,9 @@ jobs:
               START=$((LINE - 3))
               [ $START -lt 1 ] && START=1
               CHUNK=$(sed -n "${START},$((LINE + 3))p" "$LOG_FILE" 2>/dev/null)
-              CONTEXT="${CONTEXT}
---- error near line ${LINE} ---
-${CHUNK}"
+              CONTEXT="${CONTEXT}--- error near line ${LINE} ---\n${CHUNK}\n"
             done
-            CONTEXT=$(echo "$CONTEXT" | tail -25)
+            CONTEXT=$(echo -e "$CONTEXT" | tail -25)
           fi
           
           echo "error_context<<EOF" >> $GITHUB_OUTPUT
@@ -203,18 +201,26 @@ ${CHUNK}"
       - name: Send webhook
         env:
           WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          PASTY_URL: ${{ steps.pasty.outputs.pasty_url }}
+          BUILD_NUM: ${{ github.run_number }}
+          ERROR_CTX: ${{ steps.errors.outputs.error_context }}
         run: |
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          printf '%s' "$(printf '%s' '${{ steps.errors.outputs.error_context }}' | jq -Rn \
+          jq -n \
             --arg event "build_failure" \
-            --arg repo "${{ github.repository }}" \
+            --arg repo "$REPO" \
             --arg run_url "$RUN_URL" \
-            --arg sha "${{ github.sha }}" \
-            --arg ref "${{ github.ref_name }}" \
-            --arg actor "${{ github.actor }}" \
-            --arg pasty_url "${{ steps.pasty.outputs.pasty_url }}" \
-            --arg build_num "${{ github.run_number }}" \
-            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,pasty_url:$pasty_url,build_num:$build_num,error:[inputs]|join("\n")}')" > /tmp/payload.json
+            --arg sha "$SHA" \
+            --arg ref "$REF" \
+            --arg actor "$ACTOR" \
+            --arg pasty_url "$PASTY_URL" \
+            --arg build_num "$BUILD_NUM" \
+            --arg error "$ERROR_CTX" \
+            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,pasty_url:$pasty_url,build_num:$build_num,error:$error}' > /tmp/payload.json
           SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/payload.json | awk '{print "sha256="$2}')
           curl -fsSL --retry 30 -X POST \
             -H "Content-Type: application/json" \
