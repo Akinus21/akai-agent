@@ -172,7 +172,7 @@ jobs:
               -H "X-GitHub-Event: build_failure" \
               -H "X-Hub-Signature-256: $SIG" \
               --data-binary @/tmp/payload.json \
-              "https://webhook.akinus21.com/webhook/akai-agent-build"; then
+              "https://webhook.akinus21.com/webhook/akai-net-build"; then
               echo "Webhook sent successfully"
               exit 0
             fi
