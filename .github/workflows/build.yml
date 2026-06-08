@@ -53,50 +53,13 @@ jobs:
           if-no-files-found: error
           retention-days: 5
 
-      - name: Notify webhook — failure
+      - name: Upload build logs on failure
         if: failure()
-        env:
-          WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
-        run: |
-          ERRORS=$(cat build.log 2>/dev/null || echo "Build failed")
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          printf '%s' "$(printf '%s' "$ERRORS" | jq -Rn \
-            --arg event   "build_failure" \
-            --arg repo    "${{ github.repository }}" \
-            --arg run_url "$RUN_URL" \
-            --arg sha     "${{ github.sha }}" \
-            --arg ref     "${{ github.ref_name }}" \
-            --arg actor   "${{ github.actor }}" \
-            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,error:[inputs]|join("\n")}')" > /tmp/webhook-payload.json
-          SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/webhook-payload.json | awk '{print "sha256="$2}')
-          curl -fsSL --retry 3 --retry-delay 5 -X POST \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: build_failure" \
-            -H "X-Hub-Signature-256: $SIG" \
-            --data-binary @/tmp/webhook-payload.json \
-            "https://webhook.akinus21.com/webhook/akai-net-build" || true
-
-      - name: Notify webhook — success
-        if: success() && github.ref == 'refs/heads/main'
-        env:
-          WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
-        run: |
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          printf '%s' "$(jq -cn \
-            --arg event  "build_success" \
-            --arg repo   "${{ github.repository }}" \
-            --arg run_url "$RUN_URL" \
-            --arg sha    "${{ github.sha }}" \
-            --arg ref    "${{ github.ref_name }}" \
-            --arg actor  "${{ github.actor }}" \
-            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor}')" > /tmp/webhook-payload.json
-          SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/webhook-payload.json | awk '{print "sha256="$2}')
-          curl -fsSL --retry 3 --retry-delay 5 -X POST \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: build_success" \
-            -H "X-Hub-Signature-256: $SIG" \
-            --data-binary @/tmp/webhook-payload.json \
-            "https://webhook.akinus21.com/webhook/akai-net-build" || true
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build.log
+          retention-days: 5
 
   release:
     needs: [build]
@@ -214,49 +177,3 @@ jobs:
           git add Formula/akai-agent.rb
           git commit -m "Update akai-agent to ${TAG}"
           git push origin master
-
-      - name: Notify webhook — failure
-        if: failure()
-        env:
-          WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
-        run: |
-          ERRORS=$([ -f build.log ] && cat build.log || echo "No build log available")
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          printf '%s' "$(printf '%s' "$ERRORS" | jq -Rn \
-            --arg event   "build_failure" \
-            --arg repo    "${{ github.repository }}" \
-            --arg run_url "$RUN_URL" \
-            --arg sha     "${{ github.sha }}" \
-            --arg ref     "${{ github.ref_name }}" \
-            --arg actor   "${{ github.actor }}" \
-            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,error:[inputs]|join("\n")}')" > /tmp/webhook-payload.json
-          SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/webhook-payload.json | awk '{print "sha256="$2}')
-          curl -fsSL --retry 3 --retry-delay 5 -X POST \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: build_failure" \
-            -H "X-Hub-Signature-256: $SIG" \
-            --data-binary @/tmp/webhook-payload.json \
-            "https://webhook.akinus21.com/webhook/akai-net-build" || true
-
-      - name: Notify webhook — success
-        env:
-          WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
-        run: |
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          TAG="${{ steps.tag.outputs.new_tag }}"
-          printf '%s' "$(jq -cn \
-            --arg event  "build_success" \
-            --arg repo   "${{ github.repository }}" \
-            --arg run_url "$RUN_URL" \
-            --arg sha    "${{ github.sha }}" \
-            --arg ref    "${{ github.ref_name }}" \
-            --arg actor  "${{ github.actor }}" \
-            --arg tag    "$TAG" \
-            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,tag:$tag}')" > /tmp/webhook-payload.json
-          SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/webhook-payload.json | awk '{print "sha256="$2}')
-          curl -fsSL --retry 3 --retry-delay 5 -X POST \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: build_success" \
-            -H "X-Hub-Signature-256: $SIG" \
-            --data-binary @/tmp/webhook-payload.json \
-            "https://webhook.akinus21.com/webhook/akai-net-build" || true

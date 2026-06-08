@@ -54,28 +54,14 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
-      - name: Notify webhook — failure
+      - name: Upload build logs on failure
         if: failure()
-        env:
-          WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
-        run: |
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          ERROR_TEXT="Cross-platform build failed for ${{ matrix.target }}"
-          printf '%s' "$(printf '%s' "$ERROR_TEXT" | jq -Rn \
-            --arg event   "build_failure" \
-            --arg repo    "${{ github.repository }}" \
-            --arg run_url "$RUN_URL" \
-            --arg sha     "${{ github.sha }}" \
-            --arg ref     "${{ github.ref_name }}" \
-            --arg actor   "${{ github.actor }}" \
-            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,error:[inputs]|join("\n")}')" > /tmp/webhook-payload.json
-          SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/webhook-payload.json | awk '{print "sha256="$2}')
-          curl -fsSL --retry 3 --retry-delay 5 -X POST \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: build_failure" \
-            -H "X-Hub-Signature-256: $SIG" \
-            --data-binary @/tmp/webhook-payload.json \
-            "https://webhook.akinus21.com/webhook/akai-net-build" || true
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ matrix.target }}
+          path: build.log
+          retention-days: 5
+          if-no-files-found: ignore
 
   build-rpc-vulkan:
     runs-on: ubuntu-latest
@@ -193,7 +179,7 @@ jobs:
             case "$(basename "$f")" in
               *.so.*)
                 SOBASE=$(echo "$f" | sed 's/\(\.so\)\..*/\1/')
-                [ ! -L "$SOBASE" ] && [ -f "$SOBASE" ] && ln -sf "$(basename "$f")" "$SOBASE"
+                [ ! -S "$SOBASE" ] && [ -f "$SOBASE" ] && ln -sf "$(basename "$f")" "$SOBASE"
                 ;;
             esac
           done
@@ -357,50 +343,3 @@ jobs:
           git add Formula/akai-agent.rb
           git commit -m "Update akai-agent to ${TAG} (all platforms + rpc-cuda + rpc-vulkan)"
           git push origin master
-
-      - name: Notify webhook — failure
-        if: failure()
-        env:
-          WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
-        run: |
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          ERROR_TEXT="Release job failed"
-          printf '%s' "$(printf '%s' "$ERROR_TEXT" | jq -Rn \
-            --arg event   "build_failure" \
-            --arg repo    "${{ github.repository }}" \
-            --arg run_url "$RUN_URL" \
-            --arg sha     "${{ github.sha }}" \
-            --arg ref     "${{ github.ref_name }}" \
-            --arg actor   "${{ github.actor }}" \
-            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,error:[inputs]|join("\n")}')" > /tmp/webhook-payload.json
-          SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/webhook-payload.json | awk '{print "sha256="$2}')
-          curl -fsSL --retry 3 --retry-delay 5 -X POST \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: build_failure" \
-            -H "X-Hub-Signature-256: $SIG" \
-            --data-binary @/tmp/webhook-payload.json \
-            "https://webhook.akinus21.com/webhook/akai-net-build" || true
-
-      - name: Notify webhook — success
-        if: success()
-        env:
-          WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
-        run: |
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          TAG="${{ github.ref_name }}"
-          printf '%s' "$(jq -cn \
-            --arg event  "build_success" \
-            --arg repo   "${{ github.repository }}" \
-            --arg run_url "$RUN_URL" \
-            --arg sha    "${{ github.sha }}" \
-            --arg ref    "${{ github.ref_name }}" \
-            --arg actor  "${{ github.actor }}" \
-            --arg tag    "$TAG" \
-            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,tag:$tag}')" > /tmp/webhook-payload.json
-          SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/webhook-payload.json | awk '{print "sha256="$2}')
-          curl -fsSL --retry 3 --retry-delay 5 -X POST \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: build_success" \
-            -H "X-Hub-Signature-256: $SIG" \
-            --data-binary @/tmp/webhook-payload.json \
-            "https://webhook.akinus21.com/webhook/akai-net-build" || true
