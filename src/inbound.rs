@@ -121,7 +121,7 @@ async fn handle_inbound_connection(
                 prompt_tokens: 0,
                 completion_tokens: 0,
             });
-            let data = crate::protocol::encode_msg(&response)?;
+            let data = crate::protocol::encode_msg(&response);
             stream.write_all(&data).await?;
         }
         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
@@ -150,13 +150,12 @@ async fn handle_inbound_connection(
                         next_hop_connected: my_worker.next_hop.is_some(),
                     };
                     let response = HubMessage::Heartbeat(hb);
-                    if let Ok(data) = crate::protocol::encode_msg(&response) {
-                        if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
-                            hub_stream.write_all(&data).await.ok();
-                            info!("[-> hub] Heartbeat sent for layers {}-{}", my_worker.layer_offset, my_worker.layer_offset + my_worker.num_layers);
-                        } else {
-                            warn!("Failed to connect to hub at {}", hub_addr);
-                        }
+                    let data = crate::protocol::encode_msg(&response);
+                    if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
+                        hub_stream.write_all(&data).await.ok();
+                        info!("[-> hub] Heartbeat sent for layers {}-{}", my_worker.layer_offset, my_worker.layer_offset + my_worker.num_layers);
+                    } else {
+                        warn!("Failed to connect to hub at {}", hub_addr);
                     }
                 }
                 
