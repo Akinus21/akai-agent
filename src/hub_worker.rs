@@ -241,10 +241,9 @@ async fn handle_hub_message(
                             let msg = HubMessage::HeartbeatForward {
                                 pipeline: pipeline_owned,
                             };
-                            if let Ok(data) = encode_msg(&msg) {
+                            let data = encode_msg(&msg);
                                 forward_stream.write_all(&data).await.ok();
                                 info!("[-> {}] HeartbeatForward sent", hop_worker_id);
-                            }
                         }
                         Err(e) => {
                             warn!("[-> {}] HeartbeatForward FAILED: {}", hop_worker_id, e);

@@ -165,7 +165,7 @@ async fn handle_inbound_connection(
                     info!("[-> {}] Forwarding HeartbeatForward to next hop", hop.worker_id);
                     match tokio::net::TcpStream::connect(&addr).await {
                         Ok(mut forward_stream) => {
-                            let data = crate::protocol::encode_msg(&HubMessage::HeartbeatForward { pipeline: pipeline_owned });
+                            let data = crate::protocol::encode_msg(&HubMessage::HeartbeatForward { pipeline: pipeline_owned.clone() });
                             forward_stream.write_all(&data).await.ok();
                             info!("[-> {}] HeartbeatForward forwarded", hop.worker_id);
                         }
