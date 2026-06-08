@@ -1,6 +1,6 @@
 [package]
 name = "akai-agent"
-version = "0.0.135"
+version = "0.0.136"
 edition = "2021"
 description = "Remote GPU worker agent for the akai-net distributed inference system"
 license = "MIT"
