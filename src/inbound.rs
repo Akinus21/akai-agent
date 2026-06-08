@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use reqwest::Client;
 
 use crate::types::{HubMessage, PipelineState};
@@ -125,7 +125,7 @@ async fn handle_inbound_connection(
             stream.write_all(&data).await?;
         }
         HubMessage::HeartbeatForward { pipeline } => {
-            info!("Received HeartbeatForward from {} to worker", msg_src);
+            info!("Received HeartbeatForward for worker {}", worker_id);
             let pipeline_owned = pipeline.clone();
             let my_id = std::env::var("WORKER_ID").ok();
             if let Some(my_id) = my_id {
