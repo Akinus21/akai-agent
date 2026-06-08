@@ -186,7 +186,7 @@ jobs:
 
   release:
     needs: [build]
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     name: Release for Build #${{ github.run_number }}
     steps:
