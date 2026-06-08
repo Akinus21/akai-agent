@@ -273,6 +273,7 @@ async fn handle_hub_message(
                 && (resp.model_name != pipeline_guard.model_name
                     || resp.model_url != pipeline_guard.model_url
                     || (!resp.model_hash.is_empty() && resp.model_hash != pipeline_guard.model_hash));
+            let _ = model_changed;
             if model_changed {
                 pipeline_guard.model_name = resp.model_name.clone();
                 pipeline_guard.model_url = resp.model_url.clone();
