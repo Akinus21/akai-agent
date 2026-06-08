@@ -949,7 +949,6 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                         _ => {}
                                     }
                                 } // end while let Some(pos)
-                                }
                                 Err(e) => {
                                     error!("[hub] Read error: {}", e);
                                 }
