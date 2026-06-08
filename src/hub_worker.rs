@@ -1,0 +1,693 @@
+use anyhow::Result;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::{Mutex, RwLock};
+use tokio::time::Duration;
+use tracing::{error, info, warn};
+
+use crate::config::data_dir;
+use crate::protocol::{encode_msg, file_sha256};
+use crate::types::{
+    HeartbeatResponse, HubMessage, HubWorkerConfig, InferenceRequest, InferenceResponse,
+    PipelineInfo, PipelineState, WorkerHeartbeat, WorkerInfo,
+};
+use crate::{inbound, rpc};
+
+pub fn notify(title: &str, body: &str) {
+    info!("[notify] {}: {}", title, body);
+    let _ = Command::new("notify-send")
+        .args([title, body])
+        .output();
+}
+
+fn setup_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        error!("PANIC in spawned task: {}", info);
+    }));
+}
+
+pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
+    setup_panic_hook();
+    info!("Akai-Net Hub Worker starting...");
+    info!("  Hub: {}", config.hub_addr);
+    info!("  Worker ID: {}", config.worker_id);
+    info!("  GPU: {}, VRAM: {:.1} GB", config.has_gpu, config.vram_gb);
+    info!("  RPC port: {}", config.rpc_port);
+    info!("  LLM port: {}", config.llama_port);
+
+    let pipeline: Arc<RwLock<PipelineState>> =
+        Arc::new(RwLock::new(PipelineState::new(config.worker_id.clone())));
+    let rpc_child: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
+    let llama_child: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
+
+    let inbound_port = config.rpc_port;
+    let inbound_worker_id = config.worker_id.clone();
+    let inbound_pipeline = pipeline.clone();
+    tokio::spawn(async move {
+        if let Err(e) = inbound::run_inbound_listener(inbound_port, &inbound_worker_id, inbound_pipeline).await {
+            error!("Inbound listener error: {}", e);
+        }
+    });
+
+    let rpc_child_clone = rpc_child.clone();
+    let llama_child_clone = llama_child.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        eprintln!("Shutting down worker...");
+        let opt_child = rpc_child_clone.lock().await.take();
+        if let Some(mut child) = opt_child {
+            child.kill().ok();
+        }
+        let opt_child = llama_child_clone.lock().await.take();
+        if let Some(mut child) = opt_child {
+            child.kill().ok();
+        }
+        std::process::exit(0);
+    });
+
+    let mut reconnect_delay_secs = 5u64;
+    let max_reconnect_delay = 300u64;
+    loop {
+        match TcpStream::connect(&config.hub_addr).await {
+            Ok(stream) => {
+                reconnect_delay_secs = 5;
+                info!("Connected to hub at {}", config.hub_addr);
+
+                let (reader, writer) = stream.into_split();
+                let mut reader = reader;
+                let writer = Arc::new(Mutex::new(writer));
+
+                let worker_info = WorkerInfo {
+                    id: config.worker_id.clone(),
+                    name: hostname::get()
+                        .map(|h| h.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    layer_offset: 0,
+                    num_layers: 0,
+                    vram_gb: config.vram_gb,
+                    has_gpu: config.has_gpu,
+                    wg_ip: config.wg_ip.clone(),
+                    rpc_port: config.rpc_port,
+                };
+                let register = HubMessage::Register(worker_info);
+                let mut data = serde_json::to_vec(&register)?;
+                data.push(b'\n');
+                {
+                    let mut w = writer.lock().await;
+                    w.write_all(&data).await?;
+                }
+                info!("Registered with hub, maintaining persistent connection...");
+
+                let mut read_buf = Vec::new();
+                let mut tmp = [0u8; 65536];
+                loop {
+                    tokio::select! {
+                        n = reader.read(&mut tmp) => {
+                            match n {
+                                Ok(0) => {
+                                    info!("Hub connection closed (will retry in {}s, then increasing)", reconnect_delay_secs);
+                                    reconnect_delay_secs = (reconnect_delay_secs * 2).min(max_reconnect_delay);
+                                    break;
+                                }
+                                Ok(n) => {
+                                    read_buf.extend_from_slice(&tmp[..n]);
+
+                                    while let Some(pos) = read_buf.iter().position(|&b| b == b'\n') {
+                                        let line: Vec<u8> = read_buf.drain(..=pos).collect();
+                                        let line = &line[..line.len() - 1];
+
+                                        if line.is_empty() {
+                                            continue;
+                                        }
+
+                                        let msg: HubMessage = match serde_json::from_slice(line) {
+                                            Ok(m) => m,
+                                            Err(e) => {
+                                                error!("Failed to parse message: {}", e);
+                                                continue;
+                                            }
+                                        };
+
+                                        handle_hub_message(
+                                            &msg,
+                                            &config,
+                                            &pipeline,
+                                            &writer,
+                                            &rpc_child,
+                                            &llama_child,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Read error: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to connect to hub: {} (retrying in {}s)", e, reconnect_delay_secs);
+                tokio::time::sleep(Duration::from_secs(reconnect_delay_secs)).await;
+                reconnect_delay_secs = (reconnect_delay_secs * 2).min(max_reconnect_delay);
+            }
+        }
+    }
+}
+
+async fn handle_hub_message(
+    msg: &HubMessage,
+    config: &HubWorkerConfig,
+    pipeline: &Arc<RwLock<PipelineState>>,
+    writer: &Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    rpc_child: &Arc<Mutex<Option<std::process::Child>>>,
+    llama_child: &Arc<Mutex<Option<std::process::Child>>>,
+) {
+    match msg {
+        HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
+            info!(
+                "[<- hub] HeartbeatForward: pipeline_id={}, {} workers, model={}",
+                pipeline_info.pipeline_id,
+                pipeline_info.workers.len(),
+                pipeline_info.model_name
+            );
+
+            let pipeline_owned = pipeline_info.clone();
+            let my_id = &config.worker_id;
+            if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| &w.worker_id == my_id) {
+                if my_worker.is_first {
+                    info!("[self] first worker in pipeline, sending Heartbeat back to hub");
+                    let pipeline_guard = pipeline.read().await;
+                    let hb = WorkerHeartbeat {
+                        worker_id: config.worker_id.clone(),
+                        load: 0.0,
+                        layer_offset: pipeline_guard.layer_offset,
+                        num_layers: pipeline_guard.num_layers,
+                        has_gpu: config.has_gpu,
+                        vram_gb: config.vram_gb,
+                        active: true,
+                        last_hop_connected: my_worker.last_hop.is_some(),
+                        next_hop_connected: true,
+                    };
+                    let msg = HubMessage::Heartbeat(hb);
+                    let data = encode_msg(&msg);
+                    let mut w = writer.lock().await;
+                    w.write_all(&data).await.ok();
+                    info!(
+                        "[-> hub] Heartbeat: layers {}-{}, active=true",
+                        pipeline_guard.layer_offset,
+                        pipeline_guard.layer_offset + pipeline_guard.num_layers
+                    );
+                } else if my_worker.is_last {
+                    info!("[self] last worker in pipeline, sending Heartbeat back to hub");
+                    let pipeline_guard = pipeline.read().await;
+                    let hb = WorkerHeartbeat {
+                        worker_id: config.worker_id.clone(),
+                        load: 0.0,
+                        layer_offset: pipeline_guard.layer_offset,
+                        num_layers: pipeline_guard.num_layers,
+                        has_gpu: config.has_gpu,
+                        vram_gb: config.vram_gb,
+                        active: true,
+                        last_hop_connected: true,
+                        next_hop_connected: false,
+                    };
+                    let msg = HubMessage::Heartbeat(hb);
+                    let data = encode_msg(&msg);
+                    let mut w = writer.lock().await;
+                    w.write_all(&data).await.ok();
+                    info!(
+                        "[-> hub] Heartbeat: layers {}-{}, active=true, last_hop=true",
+                        pipeline_guard.layer_offset,
+                        pipeline_guard.layer_offset + pipeline_guard.num_layers
+                    );
+                }
+
+                if let Some(ref hop) = my_worker.next_hop {
+                    let hop_worker_id = hop.worker_id.clone();
+                    let hop_host = hop.host.clone();
+                    let hop_port = hop.port;
+                    let addr = format!("{}:{}", hop_host, hop_port);
+                    info!(
+                        "[-> {}] Forwarding HeartbeatForward to next hop at {}",
+                        hop_worker_id, addr
+                    );
+                    match tokio::net::TcpStream::connect(&addr).await {
+                        Ok(mut forward_stream) => {
+                            let msg = HubMessage::HeartbeatForward {
+                                pipeline: pipeline_owned,
+                            };
+                            let data = encode_msg(&msg);
+                            forward_stream.write_all(&data).await.ok();
+                            info!("[-> {}] HeartbeatForward sent", hop_worker_id);
+                        }
+                        Err(e) => {
+                            warn!("[-> {}] HeartbeatForward FAILED: {}", hop_worker_id, e);
+                        }
+                    }
+                }
+            }
+        }
+
+        HubMessage::HeartbeatResponse(resp) => {
+            info!(
+                "[<- hub] HeartbeatResponse: layers {}-{}, model={}, pipeline={}",
+                resp.layer_offset,
+                resp.layer_offset + resp.num_layers,
+                resp.model_name,
+                resp.pipeline.is_some()
+            );
+
+            let mut pipeline_guard = pipeline.write().await;
+
+            if resp.reassign || pipeline_guard.num_layers == 0 {
+                pipeline_guard.layer_offset = resp.layer_offset;
+                pipeline_guard.num_layers = resp.num_layers;
+            }
+
+            let model_changed = !resp.model_name.is_empty()
+                && (resp.model_name != pipeline_guard.model_name
+                    || resp.model_url != pipeline_guard.model_url
+                    || (!resp.model_hash.is_empty() && resp.model_hash != pipeline_guard.model_hash));
+            if model_changed {
+                pipeline_guard.model_name = resp.model_name.clone();
+                pipeline_guard.model_url = resp.model_url.clone();
+            }
+            if !resp.model_hash.is_empty() {
+                pipeline_guard.model_hash = resp.model_hash.clone();
+            }
+
+            if let Some(pl) = &resp.pipeline {
+                for w in &pl.workers {
+                    if w.worker_id == config.worker_id {
+                        pipeline_guard.last_hop = w.last_hop.clone();
+                        pipeline_guard.next_hop = w.next_hop.clone();
+                        pipeline_guard.is_first = w.is_first;
+                        pipeline_guard.is_last = w.is_last;
+                        break;
+                    }
+                }
+
+                if pipeline_guard.num_layers > 0 {
+                    if !pipeline_guard.rpc_server_started {
+                        info!(
+                            "Spawning rpc-server for layers {} to {}...",
+                            pipeline_guard.layer_offset,
+                            pipeline_guard.layer_offset + pipeline_guard.num_layers
+                        );
+
+                        let rpc_path = rpc::rpc_binary_path();
+                        if !rpc_path.exists() {
+                            info!("Downloading rpc-server...");
+                            if let Err(e) = rpc::ensure_rpc_server().await {
+                                error!("Failed to download rpc-server: {}", e);
+                                notify("akai-agent", "Failed to download rpc-server");
+                            }
+                        }
+
+                        match rpc::spawn_rpc_server(&rpc_path, config.rpc_port + 1) {
+                            Ok(child) => {
+                                rpc_child.lock().await.replace(child);
+                                info!("rpc-server started on port {}", config.rpc_port + 1);
+                                pipeline_guard.rpc_server_started = true;
+                                notify(
+                                    "akai-agent",
+                                    &format!(
+                                        "rpc-server ready (layers {}-{})",
+                                        pipeline_guard.layer_offset,
+                                        pipeline_guard.layer_offset + pipeline_guard.num_layers
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                error!("Failed to spawn rpc-server: {}", e);
+                                notify("akai-agent", "Failed to start rpc-server");
+                            }
+                        }
+                    }
+
+                    if pipeline_guard.is_first
+                        && !pipeline_guard.model_url.is_empty()
+                        && !pipeline_guard.setup_started
+                    {
+                        pipeline_guard.setup_started = true;
+                        let model_url = pipeline_guard.model_url.clone();
+                        let model_name = pipeline_guard.model_name.clone();
+                        let has_gpu = config.has_gpu;
+                        let llama_port = config.llama_port;
+                        let pipeline_clone = pipeline.clone();
+                        let model_hash_clone = pipeline_guard.model_hash.clone();
+                        let llama_child_clone = llama_child.clone();
+
+                        tokio::spawn(async move {
+                            let model_path = data_dir().join("model.gguf");
+                            let local_hash = file_sha256(&model_path);
+
+                            let hash_matches = local_hash.as_ref().map_or(false, |h| {
+                                !model_hash_clone.is_empty() && h == &model_hash_clone
+                            });
+
+                            let need_download = if !model_path.exists() {
+                                true
+                            } else if !model_hash_clone.is_empty() && !hash_matches {
+                                true
+                            } else {
+                                false
+                            };
+
+                            if !need_download {
+                                info!("Model file already exists and hash matches, skipping download");
+                                if !pipeline_clone.read().await.llama_server_started {
+                                    if let Ok(llama_path) = rpc::ensure_llama_server().await {
+                                        let ngl = if has_gpu { -1 } else { 0 };
+                                        match rpc::spawn_llama_server(
+                                            &llama_path,
+                                            &model_path.to_string_lossy(),
+                                            ngl,
+                                            llama_port,
+                                        ) {
+                                            Ok(llama_cmd) => {
+                                                info!("llama-server started on port {}", llama_port);
+                                                llama_child_clone.lock().await.replace(llama_cmd);
+                                                pipeline_clone.write().await.llama_server_started = true;
+                                                notify(
+                                                    "akai-agent",
+                                                    &format!(
+                                                        "{} ready for inference on port {}",
+                                                        model_name, llama_port
+                                                    ),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to spawn llama-server: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                return;
+                            }
+
+                            {
+                                let mut llama_guard = llama_child_clone.lock().await;
+                                if let Some(mut old) = llama_guard.take() {
+                                    info!("Model changed, stopping llama-server");
+                                    old.kill().ok();
+                                }
+                            }
+                            {
+                                let mut pipeline_guard = pipeline_clone.write().await;
+                                pipeline_guard.llama_server_started = false;
+                            }
+
+                            if model_path.exists() {
+                                info!("Deleting old model file");
+                                std::fs::remove_file(&model_path).ok();
+                            }
+                            info!("Downloading model from {}...", model_url);
+                            notify(
+                                "akai-agent",
+                                &format!("Downloading model: {}", model_name),
+                            );
+
+                            let client = reqwest::Client::new();
+                            match client
+                                .get(&model_url)
+                                .timeout(std::time::Duration::from_secs(600))
+                                .send()
+                                .await
+                            {
+                                Ok(resp) => {
+                                    if resp.status().is_success() {
+                                        let total = resp.content_length().unwrap_or(0);
+                                        if total > 0 {
+                                            info!(
+                                                "Model size: {:.1} MB",
+                                                total as f64 / 1_048_576.0
+                                            );
+                                        }
+                                        let mut downloaded: u64 = 0;
+                                        let mut last_pct: u64 = 0;
+                                        if let Some(parent) = model_path.parent() {
+                                            std::fs::create_dir_all(parent).ok();
+                                        }
+                                        let mut file =
+                                            match std::fs::File::create(&model_path) {
+                                                Ok(f) => f,
+                                                Err(e) => {
+                                                    error!(
+                                                        "Failed to create model file: {}",
+                                                        e
+                                                    );
+                                                    notify(
+                                                        "akai-agent",
+                                                        "Model download failed: cannot create file",
+                                                    );
+                                                    return;
+                                                }
+                                            };
+                                        let mut stream = resp.bytes_stream();
+                                        use futures_util::StreamExt;
+                                        use std::io::Write;
+                                        while let Some(chunk) = stream.next().await {
+                                            let chunk = match chunk {
+                                                Ok(c) => c,
+                                                Err(e) => {
+                                                    error!(
+                                                        "Model download stream error: {}",
+                                                        e
+                                                    );
+                                                    notify(
+                                                        "akai-agent",
+                                                        "Model download failed: stream error",
+                                                    );
+                                                    break;
+                                                }
+                                            };
+                                            downloaded += chunk.len() as u64;
+                                            if total > 0 {
+                                                let pct = downloaded * 100 / total;
+                                                if pct >= last_pct + 10 {
+                                                    info!(
+                                                        "Model download: {}% ({:.1}/{:.1} MB)",
+                                                        pct,
+                                                        downloaded as f64 / 1_048_576.0,
+                                                        total as f64 / 1_048_576.0
+                                                    );
+                                                    last_pct = pct;
+                                                }
+                                            }
+                                            if let Err(e) = file.write_all(&chunk) {
+                                                error!("Model write error: {}", e);
+                                                notify(
+                                                    "akai-agent",
+                                                    "Model download failed: write error",
+                                                );
+                                                break;
+                                            }
+                                        }
+                                        if let Err(e) = file.flush() {
+                                            error!("Model flush error: {}", e);
+                                        }
+                                        drop(file);
+                                        info!(
+                                            "Model downloaded to {:?} ({:.1} MB)",
+                                            model_path,
+                                            downloaded as f64 / 1_048_576.0
+                                        );
+                                        notify(
+                                            "akai-agent",
+                                            &format!(
+                                                "Model downloaded ({:.1} MB)",
+                                                downloaded as f64 / 1_048_576.0
+                                            ),
+                                        );
+                                    } else {
+                                        error!(
+                                            "Model download failed with status: {}",
+                                            resp.status()
+                                        );
+                                        notify(
+                                            "akai-agent",
+                                            &format!(
+                                                "Model download failed: HTTP {}",
+                                                resp.status()
+                                            ),
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Model download request failed: {}", e);
+                                    notify(
+                                        "akai-agent",
+                                        &format!("Model download failed: {}", e),
+                                    );
+                                }
+                            }
+
+                            if model_path.exists() {
+                                let mut pipeline_guard = pipeline_clone.write().await;
+                                if !pipeline_guard.llama_server_started {
+                                    match rpc::ensure_llama_server().await {
+                                        Ok(llama_path) => {
+                                            let ngl = if has_gpu { -1 } else { 0 };
+                                            match rpc::spawn_llama_server(
+                                                &llama_path,
+                                                &model_path.to_string_lossy(),
+                                                ngl,
+                                                llama_port,
+                                            ) {
+                                                Ok(llama_cmd) => {
+                                                    info!(
+                                                        "llama-server started on port {}",
+                                                        llama_port
+                                                    );
+                                                    llama_child_clone
+                                                        .lock()
+                                                        .await
+                                                        .replace(llama_cmd);
+                                                    pipeline_guard.llama_server_started = true;
+                                                    drop(pipeline_guard);
+                                                    notify(
+                                                        "akai-agent",
+                                                        &format!(
+                                                            "{} ready for inference on port {}",
+                                                            model_name, llama_port
+                                                        ),
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    error!(
+                                                        "Failed to spawn llama-server: {}",
+                                                        e
+                                                    );
+                                                    drop(pipeline_guard);
+                                                    notify(
+                                                        "akai-agent",
+                                                        &format!(
+                                                            "Failed to start llama-server: {}",
+                                                            e
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to ensure llama-server: {}", e);
+                                            drop(pipeline_guard);
+                                            notify(
+                                                "akai-agent",
+                                                &format!("Failed to find llama-server: {}", e),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            info!("Background setup task complete");
+                        });
+                    }
+                }
+            }
+        }
+
+        HubMessage::InferenceRequest(req) => {
+            info!(
+                "[<- hub] InferenceRequest: id={}, max_tokens={}",
+                req.id, req.max_new_tokens
+            );
+            let prompt = req.prompt.clone().unwrap_or_default();
+            let max_tokens = req.max_new_tokens;
+            let temperature = req.temperature;
+            let llama_port = config.llama_port;
+
+            let client = reqwest::Client::new();
+            let llm_url = format!("http://127.0.0.1:{}/v1/chat/completions", llama_port);
+
+            let body = serde_json::json!({
+                "model": "local",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": false
+            });
+
+            let resp_msg = match client
+                .post(&llm_url)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(120))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        if let Ok(json) = resp.json::<serde_json::Value>().await {
+                            let content = json["choices"][0]["message"]["content"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string();
+                            HubMessage::InferenceResponse(InferenceResponse {
+                                id: req.id.clone(),
+                                token: None,
+                                hidden_states: None,
+                                is_done: true,
+                                text: Some(content),
+                                prompt_tokens: 0,
+                                completion_tokens: 0,
+                            })
+                        } else {
+                            HubMessage::Error {
+                                code: "JSON_ERROR".to_string(),
+                                message: "Failed to parse LLM response".to_string(),
+                            }
+                        }
+                    } else {
+                        HubMessage::Error {
+                            code: "HTTP_ERROR".to_string(),
+                            message: format!("LLM request failed: {}", resp.status()),
+                        }
+                    }
+                }
+                Err(e) => HubMessage::Error {
+                    code: "REQUEST_ERROR".to_string(),
+                    message: e.to_string(),
+                },
+            };
+
+            let data = encode_msg(&resp_msg);
+            let mut w = writer.lock().await;
+            w.write_all(&data).await.ok();
+        }
+
+        HubMessage::InferenceForward(fwd) => {
+            info!(
+                "[<- hub] InferenceForward: from={}, to={}",
+                fwd.from_worker, fwd.to_worker
+            );
+            let pipeline_guard = pipeline.read().await;
+            if let Some(ref hop) = pipeline_guard.next_hop {
+                let addr = format!("{}:{}", hop.host, hop.port);
+                info!("[-> {}] Forwarding to next hop at {}", hop.worker_id, addr);
+                match tokio::net::TcpStream::connect(&addr).await {
+                    Ok(mut forward_stream) => {
+                        let data = encode_msg(msg);
+                        forward_stream.write_all(&data).await.ok();
+                    }
+                    Err(e) => {
+                        warn!("[-> {}] InferenceForward FAILED: {}", hop.worker_id, e);
+                    }
+                }
+            }
+        }
+
+        HubMessage::Error { code, message } => {
+            error!("[<- hub] Error: {} - {}", code, message);
+        }
+
+        _ => {
+            warn!("[<- hub] Unhandled message type: {:?}", msg);
+        }
+    }
+}
