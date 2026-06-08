@@ -966,6 +966,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
         }
     }
 }
+}
 
 async fn run_inbound_listener(
     port: u16,
