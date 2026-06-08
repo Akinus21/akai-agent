@@ -199,21 +199,31 @@ mod handlers {
                 .map(|s| s.success())
                 .unwrap_or(false);
 
-        let hub_connect_addr = if vpn_connected {
+        let hub_connect_info = if vpn_connected {
             println!("  VPN:    already connected (wg0 up)");
-            hub_addr.clone()
+            // Parse our wg_ip from the WireGuard config file
+            let our_ip = std::fs::read_to_string("/etc/wireguard/wg0.conf")
+                .ok()
+                .and_then(|c| {
+                    c.lines()
+                        .find(|l| l.trim().starts_with("Address ="))
+                        .and_then(|l| l.split('=').nth(1))
+                        .map(|v| v.trim().split('/').next().unwrap_or("").to_string())
+                })
+                .unwrap_or_default();
+            (hub_addr.clone(), our_ip)
         } else if cfg.hub_api_url.is_empty() {
             eprintln!("VPN not connected and no hub API URL configured.");
             eprintln!("Run: akai-agent init --hub <vpn_addr> --username <user> --api-url <public_api_url>");
             anyhow::bail!("Cannot enroll VPN without hub API URL");
         } else {
             println!("  VPN:    not connected, enrolling via {}...", cfg.hub_api_url);
-            let mut vpn_addr = None;
+            let mut vpn_info = None;
             for attempt in 1..=20 {
                 match enroll_vpn(&cfg.hub_api_url, &cfg.worker_id, &cfg.username).await {
-                    Ok(addr) => {
-                        println!("  VPN:    enrolled, hub at {}", addr);
-                        vpn_addr = Some(addr);
+                    Ok((addr, wg_ip)) => {
+                        println!("  VPN:    enrolled, hub at {}, our IP {}", addr, wg_ip);
+                        vpn_info = Some((addr, wg_ip));
                         break;
                     }
                     Err(e) => {
@@ -224,14 +234,16 @@ mod handlers {
                     }
                 }
             }
-            match vpn_addr {
-                Some(addr) => addr,
+            match vpn_info {
+                Some((addr, wg_ip)) => (addr, wg_ip),
                 None => {
                     eprintln!("All 20 VPN enrollment attempts failed, falling back to direct connection to {}", hub_addr);
-                    hub_addr.clone()
+                    (hub_addr.clone(), String::new())
                 }
             }
         };
+
+        let (hub_connect_addr, our_wg_ip) = hub_connect_info;
 
         let pid_file = std::path::Path::new("/run/akai-agent.pid");
         std::fs::write(pid_file, std::process::id().to_string())?;
@@ -240,6 +252,7 @@ mod handlers {
         worker::run_hub_worker(worker::HubWorkerConfig {
             hub_addr: hub_connect_addr,
             worker_id: cfg.worker_id.clone(),
+            wg_ip: our_wg_ip,
             has_gpu: gpu_info.has_gpu,
             vram_gb: gpu_info.vram_gb as f32,
             rpc_port: cfg.rpc_port,
@@ -291,7 +304,7 @@ mod handlers {
         Ok(())
     }
 
-    async fn enroll_vpn(hub_api_url: &str, worker_id: &str, username: &str) -> Result<String> {
+    async fn enroll_vpn(hub_api_url: &str, worker_id: &str, username: &str) -> Result<(String, String)> {
         let url = format!("{}/auth/vpn", hub_api_url.trim_end_matches('/'));
 
         let client = reqwest::Client::new();
@@ -316,6 +329,14 @@ mod handlers {
             .ok_or_else(|| anyhow::anyhow!("missing wireguard_config in response"))?;
         let hub_vpn_addr = json["hub_vpn_addr"].as_str()
             .ok_or_else(|| anyhow::anyhow!("missing hub_vpn_addr in response"))?;
+
+        // Parse our WireGuard IP from the config (Address = x.x.x.x/24)
+        let wg_ip = config_text
+            .lines()
+            .find(|l| l.trim().starts_with("Address ="))
+            .and_then(|l| l.split('=').nth(1))
+            .map(|v| v.trim().split('/').next().unwrap_or("").to_string())
+            .unwrap_or_default();
 
         // Bring down existing WireGuard if up
         let _ = std::process::Command::new("wg-quick")
@@ -349,6 +370,6 @@ mod handlers {
         }
         println!("  VPN:    WireGuard interface wg0 brought up");
 
-        Ok(hub_vpn_addr.to_string())
+        Ok((hub_vpn_addr.to_string(), wg_ip))
     }
 }

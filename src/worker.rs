@@ -364,6 +364,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
 pub struct HubWorkerConfig {
     pub hub_addr: String,
     pub worker_id: String,
+    pub wg_ip: String,
     pub has_gpu: bool,
     pub vram_gb: f32,
     pub rpc_port: u16,
@@ -475,7 +476,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                     num_layers: 0,
                     vram_gb: config.vram_gb,
                     has_gpu: config.has_gpu,
-                    wg_ip: String::new(),
+                    wg_ip: config.wg_ip.clone(),
                     rpc_port: config.rpc_port,
                 };
                 let register = HubMessage::Register(worker_info);
