@@ -948,7 +948,8 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                         }
                                         _ => {}
                                     }
-                                } // end while let Some(pos)
+                                }
+                                    }
                                 Err(e) => {
                                     error!("[hub] Read error: {}", e);
                                 }
@@ -965,7 +966,6 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
-}
 }
 
 async fn run_inbound_listener(
