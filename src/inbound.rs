@@ -15,14 +15,16 @@ pub async fn run_inbound_listener(
     let addr = format!("0.0.0.0:{}", port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("Inbound listening started on {}", addr);
+    let worker_id = worker_id.to_string();
     
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 info!("Inbound connection from {} to worker {}", addr, worker_id);
                 let pipeline_clone = pipeline.clone();
+                let worker_id_clone = worker_id.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_inbound_connection(stream, pipeline_clone).await {
+                    if let Err(e) = handle_inbound_connection(stream, pipeline_clone, &worker_id_clone).await {
                         error!("Inbound handler error: {}", e);
                     }
                 });
@@ -37,6 +39,7 @@ pub async fn run_inbound_listener(
 async fn handle_inbound_connection(
     mut stream: TcpStream,
     _pipeline: Arc<RwLock<PipelineState>>,
+    worker_id: &str,
 ) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     
@@ -121,19 +124,43 @@ async fn handle_inbound_connection(
             let data = crate::protocol::encode_msg(&response);
             stream.write_all(&data).await?;
         }
-        HubMessage::Heartbeat(hb) => {
-            info!("Received Heartbeat from {} (active={})", hb.worker_id, hb.active);
-            let response = HubMessage::HeartbeatResponse(crate::types::HeartbeatResponse {
-                layer_offset: 0,
-                num_layers: 0,
-                reassign: false,
-                model_name: String::new(),
-                model_url: String::new(),
-                model_hash: String::new(),
-                pipeline: None,
-            });
-            let data = crate::protocol::encode_msg(&response);
-            stream.write_all(&data).await?;
+        HubMessage::HeartbeatForward { pipeline } => {
+            info!("Received HeartbeatForward from {} to worker", msg_src);
+            let pipeline_owned = pipeline.clone();
+            let my_id = std::env::var("WORKER_ID").ok();
+            if let Some(my_id) = my_id {
+                if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| w.worker_id == my_id) {
+                    if my_worker.is_first {
+                        info!("[self] first worker - responding with Heartbeat");
+                        let response = HubMessage::Heartbeat(crate::types::WorkerHeartbeat {
+                            worker_id: my_id,
+                            load: 0.0,
+                            layer_offset: 0,
+                            num_layers: 0,
+                            has_gpu: false,
+                            vram_gb: 0.0,
+                            active: true,
+                            last_hop_connected: false,
+                            next_hop_connected: true,
+                        });
+                        let data = crate::protocol::encode_msg(&response);
+                        stream.write_all(&data).await?;
+                    }
+                    if let Some(ref hop) = my_worker.next_hop {
+                        let addr = format!("{}:{}", hop.host, hop.port);
+                        info!("[-> {}] Forwarding HeartbeatForward to next hop", hop.worker_id);
+                        match tokio::net::TcpStream::connect(&addr).await {
+                            Ok(mut forward_stream) => {
+                                let data = crate::protocol::encode_msg(&HubMessage::HeartbeatForward { pipeline: pipeline_owned });
+                                forward_stream.write_all(&data).await.ok();
+                            }
+                            Err(e) => {
+                                warn!("Failed to forward to next hop: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
         }
         _ => {
             info!("Unhandled inbound message type");
