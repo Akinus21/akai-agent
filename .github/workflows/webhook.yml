@@ -56,24 +56,39 @@ jobs:
           fi
           
           # Get content - if too large, upload in chunks using line ranges
-          TOTAL_LINES=$(wc -l < "$LOG_FILE")
+          TOTAL_LINES=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+          TOTAL_LINES=${TOTAL_LINES:-0}
           echo "Log file has $TOTAL_LINES lines"
+          
+          if [ "$TOTAL_LINES" -le 0 ]; then
+            echo "pasty_ids=no-content" >> $GITHUB_OUTPUT
+            echo "pasty_url=https://paste.akinus21.com/no-logs" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           
           PASTY_IDS=""
           CHUNK_SIZE=2000
+          START=1
           
-          for ((START=1; START<=TOTAL_LINES; START+=CHUNK_SIZE)); do
+          while [ $START -le $TOTAL_LINES ]; do
             END=$((START + CHUNK_SIZE - 1))
             [ $END -gt $TOTAL_LINES ] && END=$TOTAL_LINES
             
             CHUNK=$(sed -n "${START},${END}p" "$LOG_FILE" 2>/dev/null || echo "")
+            [ -z "$CHUNK" ] && START=$((END + 1)) && continue
             
-            # Use base64 encoding to avoid JSON escaping issues
-            CHUNK_B64=$(printf '%s' "$CHUNK" | base64 2>/dev/null | tr -d '\n')
-            PAYLOAD=$(jq -n --arg content "$CHUNK_B64" '{content: @base64($content)}' 2>/dev/null)
+            # Escape for JSON - use python if available, otherwise manual escaping
+            if command -v python3 &> /dev/null; then
+              CHUNK_ESCAPED=$(python3 -c "import json; print(json.dumps('''$CHUNK'''))" 2>/dev/null)
+            else
+              CHUNK_ESCAPED=$(printf '%s' "$CHUNK" | jq -Rs '.' 2>/dev/null)
+            fi
             
-            if [ -z "$PAYLOAD" ]; then
+            PAYLOAD=$(jq -n --argjson content "$CHUNK_ESCAPED" '{content: $content}' 2>/dev/null)
+            
+            if [ -z "$PAYLOAD" ] || [ "$PAYLOAD" = "null" ]; then
               echo "Failed to create JSON payload for lines $START-$END"
+              START=$((END + 1))
               continue
             fi
             
@@ -92,6 +107,7 @@ jobs:
               sleep 3
             done
             [ -n "$PASTE_ID" ] && [ "$PASTE_ID" != "null" ] && PASTY_IDS="${PASTY_IDS}${PASTY_IDS:+,}$PASTE_ID"
+            START=$((END + 1))
           done
           
           if [ -z "$PASTY_IDS" ]; then
