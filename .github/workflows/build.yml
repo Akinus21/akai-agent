@@ -166,12 +166,20 @@ jobs:
             --arg error "$ERROR_CTX" \
             '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,pasty_url:$pasty_url,build_num:$build_num,error:$error}' > /tmp/payload.json
           SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/payload.json | awk '{print "sha256="$2}')
-          curl -fsSL --retry 30 -X POST \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: build_failure" \
-            -H "X-Hub-Signature-256: $SIG" \
-            --data-binary @/tmp/payload.json \
-            "https://webhook.akinus21.com/webhook/akai-agent-build" || true
+          for i in $(seq 1 60); do
+            if curl -fsSL -X POST \
+              -H "Content-Type: application/json" \
+              -H "X-GitHub-Event: build_failure" \
+              -H "X-Hub-Signature-256: $SIG" \
+              --data-binary @/tmp/payload.json \
+              "https://webhook.akinus21.com/webhook/akai-agent-build"; then
+              echo "Webhook sent successfully"
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "Webhook failed after 60 attempts"
 
   release:
     needs: [build]
