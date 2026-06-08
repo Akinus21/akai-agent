@@ -162,6 +162,7 @@ pub struct HubWorkerConfig {
 
 pub struct PipelineState {
     pub my_worker_id: String,
+    pub hub_addr: String,
     pub layer_offset: usize,
     pub num_layers: usize,
     pub last_hop: Option<HopInfo>,
@@ -180,9 +181,10 @@ pub struct PipelineState {
 }
 
 impl PipelineState {
-    pub fn new(worker_id: String) -> Self {
+    pub fn new(worker_id: String, hub_addr: String) -> Self {
         Self {
             my_worker_id: worker_id,
+            hub_addr,
             layer_offset: 0,
             num_layers: 0,
             last_hop: None,

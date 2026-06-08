@@ -127,36 +127,51 @@ async fn handle_inbound_connection(
         HubMessage::HeartbeatForward { pipeline } => {
             info!("Received HeartbeatForward for worker {}", worker_id);
             let pipeline_owned = pipeline.clone();
-            let my_id = std::env::var("WORKER_ID").ok();
-            if let Some(my_id) = my_id {
-                if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| w.worker_id == my_id) {
-                    if my_worker.is_first {
-                        info!("[self] first worker - responding with Heartbeat");
-                        let response = HubMessage::Heartbeat(crate::types::WorkerHeartbeat {
-                            worker_id: my_id,
-                            load: 0.0,
-                            layer_offset: 0,
-                            num_layers: 0,
-                            has_gpu: false,
-                            vram_gb: 0.0,
-                            active: true,
-                            last_hop_connected: false,
-                            next_hop_connected: true,
-                        });
-                        let data = crate::protocol::encode_msg(&response);
-                        stream.write_all(&data).await?;
+            let my_id = worker_id.to_string();
+            
+            if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| w.worker_id == my_id) {
+                // Send Heartbeat to hub if first or last worker
+                let hub_addr = {
+                    let pipeline_guard = _pipeline.read().await;
+                    pipeline_guard.hub_addr.clone()
+                };
+                
+                if my_worker.is_first || my_worker.is_last {
+                    info!("[self] {} worker - sending Heartbeat to hub", if my_worker.is_first { "first" } else { "last" });
+                    let hb = crate::types::WorkerHeartbeat {
+                        worker_id: my_id.clone(),
+                        load: 0.0,
+                        layer_offset: my_worker.layer_offset,
+                        num_layers: my_worker.num_layers,
+                        has_gpu: false,
+                        vram_gb: 0.0,
+                        active: true,
+                        last_hop_connected: my_worker.last_hop.is_some(),
+                        next_hop_connected: my_worker.next_hop.is_some(),
+                    };
+                    let response = HubMessage::Heartbeat(hb);
+                    if let Ok(data) = crate::protocol::encode_msg(&response) {
+                        if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
+                            hub_stream.write_all(&data).await.ok();
+                            info!("[-> hub] Heartbeat sent for layers {}-{}", my_worker.layer_offset, my_worker.layer_offset + my_worker.num_layers);
+                        } else {
+                            warn!("Failed to connect to hub at {}", hub_addr);
+                        }
                     }
-                    if let Some(ref hop) = my_worker.next_hop {
-                        let addr = format!("{}:{}", hop.host, hop.port);
-                        info!("[-> {}] Forwarding HeartbeatForward to next hop", hop.worker_id);
-                        match tokio::net::TcpStream::connect(&addr).await {
-                            Ok(mut forward_stream) => {
-                                let data = crate::protocol::encode_msg(&HubMessage::HeartbeatForward { pipeline: pipeline_owned });
-                                forward_stream.write_all(&data).await.ok();
-                            }
-                            Err(e) => {
-                                warn!("Failed to forward to next hop: {}", e);
-                            }
+                }
+                
+                // Forward to next hop if exists
+                if let Some(ref hop) = my_worker.next_hop {
+                    let addr = format!("{}:{}", hop.host, hop.port);
+                    info!("[-> {}] Forwarding HeartbeatForward to next hop", hop.worker_id);
+                    match tokio::net::TcpStream::connect(&addr).await {
+                        Ok(mut forward_stream) => {
+                            let data = crate::protocol::encode_msg(&HubMessage::HeartbeatForward { pipeline: pipeline_owned });
+                            forward_stream.write_all(&data).await.ok();
+                            info!("[-> {}] HeartbeatForward forwarded", hop.worker_id);
+                        }
+                        Err(e) => {
+                            warn!("Failed to forward to next hop: {}", e);
                         }
                     }
                 }

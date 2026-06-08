@@ -38,7 +38,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
     info!("  LLM port: {}", config.llama_port);
 
     let pipeline: Arc<RwLock<PipelineState>> =
-        Arc::new(RwLock::new(PipelineState::new(config.worker_id.clone())));
+        Arc::new(RwLock::new(PipelineState::new(config.worker_id.clone(), config.hub_addr.clone())));
     let rpc_child: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
     let llama_child: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
 
