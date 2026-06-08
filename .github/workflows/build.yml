@@ -242,11 +242,11 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          name: akai-agent-linux-x86_64
+          path: .
 
       - name: Setup
         run: |
-          cp artifacts/akai-agent-linux-x86_64/akai-agent ./akai-agent
           chmod +x ./akai-agent
           SHA256=$(sha256sum ./akai-agent | awk '{print $1}')
           echo "SHA256=$SHA256" >> $GITHUB_ENV
@@ -296,10 +296,13 @@ jobs:
             ./akai-agent 2>/dev/null || true
 
       - name: Update Homebrew tap
-        if: ${{ secrets.TAP_TOKEN != '' }}
         env:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
         run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "TAP_TOKEN not set, skipping Homebrew update"
+            exit 0
+          fi
           TAG="${{ steps.version.outputs.new_tag }}"
           SHA256="${{ env.SHA256 }}"
           BASE="https://github.com/${{ github.repository }}/releases/download/${TAG}"
