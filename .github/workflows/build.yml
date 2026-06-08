@@ -108,61 +108,71 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload to pasty
+- name: Upload to pasty
         id: pasty
         run: |
-          LOG_FILE="${{ env.LOG_FILE }}"
-          if [ ! -f "$LOG_FILE" ] || [ ! -s "$LOG_FILE" ]; then
-            echo "pasty_ids=no-logs" >> $GITHUB_OUTPUT
-            echo "pasty_url=https://paste.akinus21.com/no-logs" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          TOTAL_LINES=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-          echo "Log has $TOTAL_LINES lines"
-          
-          if [ -z "$TOTAL_LINES" ] || [ "$TOTAL_LINES" = "0" ]; then
-            echo "pasty_ids=no-content" >> $GITHUB_OUTPUT
-            echo "pasty_url=https://paste.akinus21.com/no-logs" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          PASTY_IDS=""
-          CHUNK_SIZE=2000
-          START=1
-          
-          while [ $START -le $TOTAL_LINES ]; do
-            END=$((START + CHUNK_SIZE - 1))
-            [ $END -gt $TOTAL_LINES ] && END=$TOTAL_LINES
-            
-            CHUNK=$(sed -n "${START},${END}p" "$LOG_FILE" 2>/dev/null || echo "")
-            [ -z "$CHUNK" ] && START=$((END + 1)) && continue
-            
-            # Create JSON manually to avoid escaping issues
-            CHUNK_ESCAPED=$(printf '%s' "$CHUNK" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null)
-            PAYLOAD="{\"content\": $CHUNK_ESCAPED}"
-            
-            PASTE_ID=""
-            for i in $(seq 1 30); do
-              RESP=$(curl -sS -X POST \
-                -H "Content-Type: application/json" \
-                -d "$PAYLOAD" \
-                "https://paste.akinus21.com/api/v2/pastes")
-              PASTE_ID=$(echo "$RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("id",""))' 2>/dev/null)
-              if [ -n "$PASTE_ID" ] && [ "$PASTE_ID" != "None" ]; then
-                echo "Uploaded $START-$END -> $PASTE_ID"
+          python3 << 'PYEOF'
+import os
+import subprocess
+import json
+import sys
+
+LOG_FILE = os.environ.get('LOG_FILE', '/tmp/logs/build.log')
+if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0:
+    print("pasty_ids=no-logs")
+    print("pasty_url=https://paste.akinus21.com/no-logs")
+    sys.exit(0)
+
+with open(LOG_FILE, 'r') as f:
+    lines = f.readlines()
+
+total_lines = len(lines)
+print(f"Log has {total_lines} lines")
+
+if total_lines == 0:
+    print("pasty_ids=no-content")
+    print("pasty_url=https://paste.akinus21.com/no-logs")
+    sys.exit(0)
+
+pasty_ids = []
+chunk_size = 2000
+
+for start in range(0, total_lines, chunk_size):
+    end = min(start + chunk_size, total_lines)
+    chunk = ''.join(lines[start:end])
+    
+    payload = json.dumps({"content": chunk})
+    
+    paste_id = None
+    for i in range(30):
+        try:
+            result = subprocess.run(
+                ['curl', '-sS', '-X', 'POST',
+                 '-H', 'Content-Type: application/json',
+                 '-d', payload,
+                 'https://paste.akinus21.com/api/v2/pastes'],
+                capture_output=True, text=True, timeout=10
+            )
+            resp = json.loads(result.stdout)
+            paste_id = resp.get('id', '')
+            if paste_id:
+                print(f"Uploaded {start+1}-{end} -> {paste_id}")
                 break
-              fi
-              sleep 3
-            done
-            [ -n "$PASTE_ID" ] && [ "$PASTE_ID" != "null" ] && PASTY_IDS="${PASTY_IDS}${PASTY_IDS:+,}$PASTE_ID"
-            START=$((END + 1))
-          done
-          
-          [ -z "$PASTY_IDS" ] && PASTY_IDS="failed"
-          echo "pasty_ids=$PASTY_IDS" >> $GITHUB_OUTPUT
-          FIRST_ID="${PASTY_IDS%%,*}"
-          echo "pasty_url=https://paste.akinus21.com/${FIRST_ID}" >> $GITHUB_OUTPUT
+        except Exception as e:
+            print(f"Attempt {i+1} failed: {e}")
+        import time
+        time.sleep(3)
+    
+    if paste_id:
+        pasty_ids.append(paste_id)
+
+if pasty_ids:
+    print(f"pasty_ids={','.join(pasty_ids)}")
+    print(f"pasty_url=https://paste.akinus21.com/{pasty_ids[0]}")
+else:
+    print("pasty_ids=failed")
+    print("pasty_url=https://paste.akinus21.com/error")
+PYEOF
 
       - name: Extract errors (max 25 lines)
         id: errors
