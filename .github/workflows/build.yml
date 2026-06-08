@@ -108,71 +108,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-- name: Upload to pasty
+      - name: Upload to pasty
         id: pasty
         run: |
-          python3 << 'PYEOF'
-import os
-import subprocess
-import json
-import sys
-
-LOG_FILE = os.environ.get('LOG_FILE', '/tmp/logs/build.log')
-if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0:
-    print("pasty_ids=no-logs")
-    print("pasty_url=https://paste.akinus21.com/no-logs")
-    sys.exit(0)
-
-with open(LOG_FILE, 'r') as f:
-    lines = f.readlines()
-
-total_lines = len(lines)
-print(f"Log has {total_lines} lines")
-
-if total_lines == 0:
-    print("pasty_ids=no-content")
-    print("pasty_url=https://paste.akinus21.com/no-logs")
-    sys.exit(0)
-
-pasty_ids = []
-chunk_size = 2000
-
-for start in range(0, total_lines, chunk_size):
-    end = min(start + chunk_size, total_lines)
-    chunk = ''.join(lines[start:end])
-    
-    payload = json.dumps({"content": chunk})
-    
-    paste_id = None
-    for i in range(30):
-        try:
-            result = subprocess.run(
-                ['curl', '-sS', '-X', 'POST',
-                 '-H', 'Content-Type: application/json',
-                 '-d', payload,
-                 'https://paste.akinus21.com/api/v2/pastes'],
-                capture_output=True, text=True, timeout=10
-            )
-            resp = json.loads(result.stdout)
-            paste_id = resp.get('id', '')
-            if paste_id:
-                print(f"Uploaded {start+1}-{end} -> {paste_id}")
-                break
-        except Exception as e:
-            print(f"Attempt {i+1} failed: {e}")
-        import time
-        time.sleep(3)
-    
-    if paste_id:
-        pasty_ids.append(paste_id)
-
-if pasty_ids:
-    print(f"pasty_ids={','.join(pasty_ids)}")
-    print(f"pasty_url=https://paste.akinus21.com/{pasty_ids[0]}")
-else:
-    print("pasty_ids=failed")
-    print("pasty_url=https://paste.akinus21.com/error")
-PYEOF
+          python3 -c "$(echo 'aW1wb3J0IG9zLCBzdWJwcm9jZXNzLCBqc29uLCBzeXMKIExPR19GSUxFID0gb3MuZW52aXJvbi5nZXQoJ0xPR19GSUxFJywgJy90bXAvbG9ncy9idWlsZC5sb2cnKQppZiBub3Qgb3MucGF0aC5leGlzdHMoTE9HX0ZJTEUpIG9yIG9zLnBhdGguZ2V0c2l6ZShMRUdfRklMRSkgPT0gMDoKICAgIHByaW50KCdwYXN0eV9pZHM9bm8tbG9ncycpCiAgICBwcmludCgncGFzdHlfdXJsPWh0dHBzOi8vcGFzdGUuYWtpbnVzMjEuY29tL25vLWxvZ3MnKQogICAgc3lzLmV4aXQoMCkKd2l0aCBvcGVuKExPR19GSUxFLCAncicpIGFzIGY6CiAgICBsaW5lcyA9IGYucmVhZGxpbmVzKCkKdG90YWxfbGluZXMgPSBsZW4obGluZXMpCnByaW50KGYnTG9nIGhhcyB7dG90YWxfbGluZXN9IGxpbmVzJykKaWYgdG90YWxfbGluZXMgPT0gMDoKICAgIHByaW50KCdwYXN0eV9pZHM9bm8tY29udGVudCcpCiAgICBwcmludCgncGFzdHlfdXJsPWh0dHBzOi8vcGFzdGUuYWtpbnVzMjEuY29tL25vLWxvZ3MnKQogICAgc3lzLmV4aXQoMCkKcGFzdHlfaWRzID0gW10KY2h1bmtfc2l6ZSA9IDIwMDAKZm9yIHN0YXJ0IGluIHJhbmdlKDAsIHRvdGFsX2xpbmVzLCBjaHVua19zaXplKToKICAgIGVuZCA9IG1pbihzdGFydCArIGNodW5rX3NpemUsIHRvdGFsX2xpbmVzKQogICAgY2h1bmsgPSAnJy5qb2luKGxpbmVzW3N0YXJ0OmVuZF0pCiAgICBwYXlsb2FkID0ganNvbi5kcHN0cyh7J2NvbnRlbnQnOiBjaHVuayB9KQogICAgcGFzdGVfaWQgPSBOb25lCiAgICBmb3IgaSBpbiByYW5nZSgzMCk6CiAgICAgICAgdHJ5OgogICAgICAgICAgICByZXN1bHQgPSBzdWJwcm9jZXNzLnJ1bigKICAgICAgICAgICAgICAgIFsnY3VybCcsICctc1MnLCAnLVgnLCAnUE9TVCcsICctSCcsICdDb250ZW50LVR5cGU6IGFwcGxpY2F0aW9uL2pzb24nLCAnLWQnLCBwYXlsb2FkLAogICAgICAgICAgICAgICAgJ2h0dHBzOi8vcGFzdGUuYWtpbnVzMjEuY29tL2FwaS92Mi9wYXN0ZXMnXSwKICAgICAgICAgICAgICAgIGNhcHR1cmVfb3V0cHV0PUB0cnVlLCB0ZXh0PXRydWUsIHRpbWVvdXQ9MTApCiAgICAgICAgICAgIHJlc3AgPSBqc29uLmxvYWRzKHJlc3VsdC5zdGRvdXQpCiAgICAgICAgICAgIHBhc3RlX2lkID0gcmVzcC5nZXQoJ2lkJywgJycpCiAgICAgICAgICAgIGlmIHBhc3RlX2lkOgogICAgICAgICAgICAgICAgcHJpbnQoZidVcGxvYWRlZCB7c3RhcnQrMX17LWVuZCB9IC0+IHtwYXN0ZV9pZH0nKQogICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgICAgIHByaW50KGYnQXR0ZW1wdCB7aSsxfSBmYWlsZWQ6IHtlfScpCiAgICAgICAgaW1wb3J0IHRpbWU7IHRpbWUuc2xlZXAoMykKICAgIGlmIHBhc3RlX2lkOgogICAgICAgIHBhc3R5X2lkcy5hcHBlbmQocGFzdGVfaWQpCmlmIHBhc3R5X2lkcyw6CiAgICBwcmludChmJ3Bhc3R5X2lkcz17IiwiLmpvaW4ocGFzdHlfaWRzKX0nKQogICAgcHJpbnQoZidwYXN0eV91cmw9aHR0cHM6Ly9wYXN0ZS5ha2ludXMyMS5jb20ve3Bhc3R5X2lkc1swXX0nKQplbHNlOgogICAgcHJpbnQoJ3Bhc3R5X2lkcz1mYWlsZWQnKQogICAgcHJpbnQoJ3Bhc3R5X3VybD1odHRwczovL3Bhc3RlLmFraW51czIxLmNvbS9lcnJvcicpCg==' | base64 -d)"
 
       - name: Extract errors (max 25 lines)
         id: errors
