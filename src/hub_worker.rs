@@ -285,6 +285,8 @@ async fn handle_hub_message(
             if let Some(pl) = &resp.pipeline {
                 for w in &pl.workers {
                     if w.worker_id == config.worker_id {
+                        pipeline_guard.layer_offset = w.layer_offset;
+                        pipeline_guard.num_layers = w.num_layers;
                         pipeline_guard.last_hop = w.last_hop.clone();
                         pipeline_guard.next_hop = w.next_hop.clone();
                         pipeline_guard.is_first = w.is_first;
