@@ -147,9 +147,9 @@ jobs:
               RESP=$(curl -sS -X POST \
                 -H "Content-Type: application/json" \
                 -d "$PAYLOAD" \
-                "https://paste.akinus21.com/api/v2/pastes" 2>/dev/null)
-              PASTE_ID=$(printf '%s' "$RESP" | jq -r '.id // empty' 2>/dev/null)
-              if [ -n "$PASTE_ID" ] && [ "$PASTE_ID" != "null" ]; then
+                "https://paste.akinus21.com/api/v2/pastes")
+              PASTE_ID=$(echo "$RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("id",""))' 2>/dev/null)
+              if [ -n "$PASTE_ID" ] && [ "$PASTE_ID" != "None" ]; then
                 echo "Uploaded $START-$END -> $PASTE_ID"
                 break
               fi
@@ -173,8 +173,8 @@ jobs:
             exit 0
           fi
           
-          ERRORS=$(grep -n -iE '^error\[E[0-9]+\]|^error:|fatal|cannot find|not found|compilation failed' \
-            "$LOG_FILE" 2>/dev/null | head -5 | cut -d: -f1)
+          ERRORS=$(grep -n -iE 'error\[E[0-9]+\]|error:|fatal|cannot find|not found|compilation failed' \
+            "$LOG_FILE" 2>/dev/null | head -5 | cut -d: -f1 | tr '\n' ' ')
           
           if [ -z "$ERRORS" ]; then
             CONTEXT=$(tail -25 "$LOG_FILE" 2>/dev/null)
