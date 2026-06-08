@@ -194,7 +194,7 @@ async fn handle_hub_message(
                         next_hop_connected: true,
                     };
                     let msg = HubMessage::Heartbeat(hb);
-                    let data = encode_msg(&msg);
+                    let data = encode_msg(&msg)?;
                     let mut w = writer.lock().await;
                     w.write_all(&data).await.ok();
                     info!(
@@ -217,7 +217,7 @@ async fn handle_hub_message(
                         next_hop_connected: false,
                     };
                     let msg = HubMessage::Heartbeat(hb);
-                    let data = encode_msg(&msg);
+                    let data = encode_msg(&msg)?;
                     let mut w = writer.lock().await;
                     w.write_all(&data).await.ok();
                     info!(
@@ -241,7 +241,7 @@ async fn handle_hub_message(
                             let msg = HubMessage::HeartbeatForward {
                                 pipeline: pipeline_owned,
                             };
-                            let data = encode_msg(&msg);
+                            let data = encode_msg(&msg)?;
                             forward_stream.write_all(&data).await.ok();
                             info!("[-> {}] HeartbeatForward sent", hop_worker_id);
                         }
@@ -657,7 +657,7 @@ async fn handle_hub_message(
                 },
             };
 
-            let data = encode_msg(&resp_msg);
+            let data = encode_msg(&resp_msg)?;
             let mut w = writer.lock().await;
             w.write_all(&data).await.ok();
         }
@@ -673,7 +673,7 @@ async fn handle_hub_message(
                 info!("[-> {}] Forwarding to next hop at {}", hop.worker_id, addr);
                 match tokio::net::TcpStream::connect(&addr).await {
                     Ok(mut forward_stream) => {
-                        let data = encode_msg(msg);
+                        let data = encode_msg(msg)?;
                         forward_stream.write_all(&data).await.ok();
                     }
                     Err(e) => {

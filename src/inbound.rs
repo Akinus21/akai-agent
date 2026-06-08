@@ -91,7 +91,7 @@ async fn handle_inbound_connection(
                             completion_tokens: 0,
                         });
                         
-                        let data = crate::protocol::encode_msg(&response);
+                        let data = crate::protocol::encode_msg(&response)?;
                         stream.write_all(&data).await?;
                     }
                 }
@@ -101,7 +101,7 @@ async fn handle_inbound_connection(
                         code: "LLM_ERROR".to_string(),
                         message: e.to_string(),
                     };
-                    let data = crate::protocol::encode_msg(&response);
+                    let data = crate::protocol::encode_msg(&response)?;
                     stream.write_all(&data).await?;
                 }
             }
@@ -121,7 +121,7 @@ async fn handle_inbound_connection(
                 prompt_tokens: 0,
                 completion_tokens: 0,
             });
-            let data = crate::protocol::encode_msg(&response);
+            let data = crate::protocol::encode_msg(&response)?;
             stream.write_all(&data).await?;
         }
         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
@@ -166,7 +166,7 @@ async fn handle_inbound_connection(
                     info!("[-> {}] Forwarding HeartbeatForward to next hop", hop.worker_id);
                     match tokio::net::TcpStream::connect(&addr).await {
                         Ok(mut forward_stream) => {
-                            let data = crate::protocol::encode_msg(&HubMessage::HeartbeatForward { pipeline: pipeline_owned });
+                            let data = crate::protocol::encode_msg(&HubMessage::HeartbeatForward { pipeline: pipeline_owned })?;
                             forward_stream.write_all(&data).await.ok();
                             info!("[-> {}] HeartbeatForward forwarded", hop.worker_id);
                         }
