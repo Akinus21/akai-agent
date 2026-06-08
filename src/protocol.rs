@@ -14,7 +14,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 }
 
 pub fn file_sha256(path: &std::path::Path) -> Option<String> {
-    use sha2::Sha256;
+    use sha2::{Sha256, Digest};
     use std::io::Read;
     let mut file = std::fs::File::open(path).ok()?;
     let mut hasher = Sha256::new();
@@ -26,5 +26,5 @@ pub fn file_sha256(path: &std::path::Path) -> Option<String> {
             Err(_) => return None,
         }
     }
-    Some(format!("{:x}", sha2::Digest::finalize(hasher)))
+    Some(format!("{:x}", Digest::finalize(hasher)))
 }

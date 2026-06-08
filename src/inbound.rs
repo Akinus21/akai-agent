@@ -105,10 +105,14 @@ async fn handle_inbound_connection(
         }
         HubMessage::InferenceForward(fwd) => {
             info!("Received InferenceForward from {} to {}", fwd.from_worker, fwd.to_worker);
+            let hidden_states: Vec<f32> = fwd.data
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
             let response = HubMessage::InferenceResponse(crate::types::InferenceResponse {
                 id: fwd.id,
                 token: None,
-                hidden_states: Some(fwd.data),
+                hidden_states: Some(hidden_states),
                 is_done: false,
                 text: None,
                 prompt_tokens: 0,

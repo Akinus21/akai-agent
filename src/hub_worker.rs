@@ -10,8 +10,8 @@ use tracing::{error, info, warn};
 use crate::config::data_dir;
 use crate::protocol::{encode_msg, file_sha256};
 use crate::types::{
-    HeartbeatResponse, HubMessage, HubWorkerConfig, InferenceRequest, InferenceResponse,
-    PipelineInfo, PipelineState, WorkerHeartbeat, WorkerInfo,
+    HubMessage, HubWorkerConfig, InferenceResponse,
+    PipelineState, WorkerHeartbeat, WorkerInfo,
 };
 use crate::{inbound, rpc};
 
