@@ -1,4 +1,4 @@
-name: Build and Release
+name: Build Binary
 
 on:
   push:
@@ -61,18 +61,192 @@ jobs:
           path: build.log
           retention-days: 5
 
+      - name: Upload release asset
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: |
+          BINARY="target/release/akai-agent"
+          SHA256=$(sha256sum "$BINARY" | awk '{print $1}')
+          ASSET_ID=$(gh release view --json 'assets' --jq '.assets[] | select(.name == "akai-agent") | .id' latest 2>/dev/null || echo "")
+          if [ -n "$ASSET_ID" ]; then
+            gh release delete-asset latest "akai-agent" --yes 2>/dev/null || true
+          fi
+          gh release upload latest "$BINARY" --clobber 2>/dev/null || true
+
+  webhook-failure:
+    needs: [build]
+    if: failure()
+    runs-on: ubuntu-latest
+    name: Webhook Notification for Build #${{ github.run_number }}
+    steps:
+      - name: Download build logs
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.run_id }}
+          name: build-logs
+          path: /tmp/logs
+        continue-on-error: true
+
+      - name: Collect logs
+        run: |
+          LOG_FILE=""
+          for f in /tmp/logs/build.log /tmp/logs/build-errors.txt; do
+            if [ -f "$f" ] && [ -s "$f" ]; then
+              LOG_FILE="$f"
+              break
+            fi
+          done
+          if [ -z "$LOG_FILE" ]; then
+            mkdir -p /tmp/logs
+            echo "No build logs available" > /tmp/logs/build.log
+            LOG_FILE=/tmp/logs/build.log
+          fi
+          echo "LOG_FILE=$LOG_FILE" >> $GITHUB_ENV
+          LINES=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+          echo "LOG_LINES=$LINES" >> $GITHUB_ENV
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload to pasty
+        id: pasty
+        run: |
+          LOG_FILE="${{ env.LOG_FILE }}"
+          if [ ! -f "$LOG_FILE" ] || [ ! -s "$LOG_FILE" ]; then
+            echo "pasty_ids=no-logs" >> $GITHUB_OUTPUT
+            echo "pasty_url=https://paste.akinus21.com/no-logs" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          TOTAL_LINES=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+          TOTAL_LINES=${TOTAL_LINES:-0}
+          echo "Log has $TOTAL_LINES lines"
+          
+          if [ "$TOTAL_LINES" -le 0 ]; then
+            echo "pasty_ids=no-content" >> $GITHUB_OUTPUT
+            echo "pasty_url=https://paste.akinus21.com/no-logs" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          PASTY_IDS=""
+          CHUNK_SIZE=2000
+          START=1
+          
+          while [ $START -le $TOTAL_LINES ]; do
+            END=$((START + CHUNK_SIZE - 1))
+            [ $END -gt $TOTAL_LINES ] && END=$TOTAL_LINES
+            
+            CHUNK=$(sed -n "${START},${END}p" "$LOG_FILE" 2>/dev/null || echo "")
+            [ -z "$CHUNK" ] && START=$((END + 1)) && continue
+            
+            CHUNK_B64=$(printf '%s' "$CHUNK" | base64 2>/dev/null | tr -d '\n')
+            PAYLOAD=$(jq -n --arg content "$CHUNK_B64" '{content: @base64($content)}' 2>/dev/null)
+            
+            if [ -z "$PAYLOAD" ]; then
+              START=$((END + 1))
+              continue
+            fi
+            
+            PASTE_ID=""
+            for i in $(seq 1 30); do
+              RESP=$(printf '%s' "$PAYLOAD" | curl -sS -X POST \
+                -H "Content-Type: application/json" \
+                -d @- \
+                "https://paste.akinus21.com/api/v2/pastes" 2>/dev/null)
+              PASTE_ID=$(printf '%s' "$RESP" | jq -r '.id // empty' 2>/dev/null)
+              if [ -n "$PASTE_ID" ] && [ "$PASTE_ID" != "null" ]; then
+                echo "Uploaded $START-$END -> $PASTE_ID"
+                break
+              fi
+              sleep 3
+            done
+            [ -n "$PASTE_ID" ] && [ "$PASTE_ID" != "null" ] && PASTY_IDS="${PASTY_IDS}${PASTY_IDS:+,}$PASTE_ID"
+            START=$((END + 1))
+          done
+          
+          [ -z "$PASTY_IDS" ] && PASTY_IDS="failed"
+          echo "pasty_ids=$PASTY_IDS" >> $GITHUB_OUTPUT
+          FIRST_ID="${PASTY_IDS%%,*}"
+          echo "pasty_url=https://paste.akinus21.com/${FIRST_ID}" >> $GITHUB_OUTPUT
+
+      - name: Extract errors (max 25 lines)
+        id: errors
+        run: |
+          LOG_FILE="${{ env.LOG_FILE }}"
+          if [ -z "$LOG_FILE" ] || [ ! -f "$LOG_FILE" ] || [ ! -s "$LOG_FILE" ]; then
+            echo "error_context=Build failed. No logs available." >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          ERRORS=$(grep -n -iE '^error\[E[0-9]+\]|^error:|fatal|cannot find|not found|compilation failed' \
+            "$LOG_FILE" 2>/dev/null | head -5 | cut -d: -f1)
+          
+          if [ -z "$ERRORS" ]; then
+            CONTEXT=$(tail -25 "$LOG_FILE" 2>/dev/null)
+          else
+            CONTEXT=""
+            for LINE in $ERRORS; do
+              START=$((LINE - 3))
+              [ $START -lt 1 ] && START=1
+              CHUNK=$(sed -n "${START},$((LINE + 3))p" "$LOG_FILE" 2>/dev/null)
+              CONTEXT="${CONTEXT}
+--- error near line ${LINE} ---
+${CHUNK}"
+            done
+            CONTEXT=$(echo "$CONTEXT" | tail -25)
+          fi
+          
+          echo "error_context<<EOF" >> $GITHUB_OUTPUT
+          echo "$CONTEXT" | head -25 >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Send webhook
+        env:
+          WEBHOOK_HMAC_SECRET: ${{ secrets.WEBHOOK_HMAC_SECRET }}
+        run: |
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          printf '%s' "$(printf '%s' '${{ steps.errors.outputs.error_context }}' | jq -Rn \
+            --arg event "build_failure" \
+            --arg repo "${{ github.repository }}" \
+            --arg run_url "$RUN_URL" \
+            --arg sha "${{ github.sha }}" \
+            --arg ref "${{ github.ref_name }}" \
+            --arg actor "${{ github.actor }}" \
+            --arg pasty_url "${{ steps.pasty.outputs.pasty_url }}" \
+            --arg build_num "${{ github.run_number }}" \
+            '{event:$event,repo:$repo,run_url:$run_url,sha:$sha,ref:$ref,actor:$actor,pasty_url:$pasty_url,build_num:$build_num,error:[inputs]|join("\n")}')" > /tmp/payload.json
+          SIG=$(openssl dgst -sha256 -hmac "$WEBHOOK_HMAC_SECRET" /tmp/payload.json | awk '{print "sha256="$2}')
+          curl -fsSL --retry 30 -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: build_failure" \
+            -H "X-Hub-Signature-256: $SIG" \
+            --data-binary @/tmp/payload.json \
+            "https://webhook.akinus21.com/webhook/akai-agent-build" || true
+
   release:
     needs: [build]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    name: Release for Build #${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_TOKEN || github.token }}
 
-      - name: Compute new version tag
-        id: tag
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Setup
+        run: |
+          cp artifacts/akai-agent-linux-x86_64/akai-agent ./akai-agent
+          chmod +x ./akai-agent
+          SHA256=$(sha256sum ./akai-agent | awk '{print $1}')
+          echo "SHA256=$SHA256" >> $GITHUB_ENV
+
+      - name: Compute version
+        id: version
         run: |
           git fetch --tags --prune-tags 2>/dev/null || true
           PREV=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
@@ -83,97 +257,76 @@ jobs:
           while git rev-parse "v${MAJ}.${MIN}.${PAT}" >/dev/null 2>&1; do
             PAT=$((10#$PAT + 1))
           done
-          echo "new_tag=v${MAJ}.${MIN}.${PAT}" >> $GITHUB_OUTPUT
+          NEW_TAG="v${MAJ}.${MIN}.${PAT}"
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          echo "version=${NEW_TAG#v}" >> $GITHUB_OUTPUT
 
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Collect artifacts
+      - name: Update Cargo.toml
         run: |
-          cp artifacts/akai-agent-linux-x86_64/akai-agent ./akai-agent
-          ls -la ./akai-agent
-          sha256sum ./akai-agent
-
-      - name: Update Cargo.toml version
-        run: |
-          VER="${{ steps.tag.outputs.new_tag }}"; VER="${VER#v}"
-          awk -F'= ' '/^\[package\]/{p=1} p && /^version/{gsub(/"[^"]+"/,"\"'"$VER"'\""); p=0} 1' \
+          VER="${{ steps.version.outputs.version }}"
+          awk -F'= ' '/^\[package\]/{p=1} p && /^version/{gsub(/"[^"]+"/,"\"'$VER'\""); p=0} 1' \
             Cargo.toml > tmp && mv tmp Cargo.toml
-          git add Cargo.toml
-          git config --global user.email "aktags-bot@akinus21.com"
-          git config --global user.name "AkTags Bot"
-          git diff --cached --quiet || \
-            git commit -m "chore: bump version to ${VER} [skip ci]"
 
-      - name: Tag and create GitHub release
-        id: release
+      - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
         run: |
-          set -euo pipefail
-          git config --global user.email "aktags-bot@akinus21.com"
-          git config --global user.name "AkTags Bot"
-          git remote set-url origin \
-            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          TAG="${{ steps.tag.outputs.new_tag }}"
-          SHA256=$(sha256sum akai-agent | awk '{print $1}')
-
-          git push origin HEAD:main
-
-          git tag -fa "$TAG" -m "Release $TAG" || {
-            echo "Tag $TAG already exists, deleting and recreating..."
-            git tag -d "$TAG" 2>/dev/null || true
-            git push origin ":refs/tags/$TAG" 2>/dev/null || true
-            git tag -a "$TAG" -m "Release $TAG"
-          }
-          git push origin "$TAG"
-
-          # Create release only if it doesn't exist
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" --notes "" \
-              akai-agent
-          fi
-          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
-          echo "new_tag=$TAG"   >> $GITHUB_OUTPUT
+          TAG="${{ steps.version.outputs.new_tag }}"
+          SHA256="${{ env.SHA256 }}"
+          
+          git config user.email "aktags-bot@akinus21.com"
+          git config user.name "AkTags Bot"
+          git add Cargo.toml
+          git commit -m "chore: bump version to ${TAG#v}" || true
+          git push origin main 2>/dev/null || true
+          
+          git tag -fa "$TAG" -m "Release $TAG" 2>/dev/null || \
+            (git tag -d "$TAG" 2>/dev/null; git tag -a "$TAG" -m "Release $TAG")
+          git push origin "$TAG" --force 2>/dev/null || true
+          
+          gh release create "$TAG" \
+            --title "$TAG (build #${{ github.run_number }})" \
+            --notes "SHA256: $SHA256" \
+            ./akai-agent 2>/dev/null || true
 
       - name: Update Homebrew tap
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: ${{ secrets.TAP_TOKEN != '' }}
         env:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
         run: |
-          set -euo pipefail
-          [ -z "${TAP_TOKEN:-}" ] && echo "No TAP_TOKEN; skipping" && exit 0
-          TAG="${{ steps.tag.outputs.new_tag }}"
-          SHA="${{ steps.release.outputs.sha256 }}"
-          BASE="https://github.com/Akinus21/akai-agent/releases/download/${TAG}"
+          TAG="${{ steps.version.outputs.new_tag }}"
+          SHA256="${{ env.SHA256 }}"
+          BASE="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          
           TAP="/tmp/homebrew-tap"
           rm -rf "$TAP"
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/Akinus21/homebrew-tap.git" "$TAP"
-          cd "$TAP" && mkdir -p Formula
-          cat > Formula/akai-agent.rb <<EOF
-          class AkaiAgent < Formula
-            desc "Remote GPU worker agent for the akai-net distributed inference system"
-            homepage "https://github.com/Akinus21/akai-agent"
-            version "${TAG#v}"
-            license "MIT"
-            depends_on "cmake"
-            depends_on "gcc"
-            depends_on "git"
-            on_linux do
-              url "${BASE}/akai-agent"
-              sha256 "${SHA}"
-            end
-            def install
-              bin.install "akai-agent" => "akai-agent"
-            end
-            test do
-              assert_match "akai-agent", shell_output("#{bin}/akai-agent --help")
-            end
-          end
-          EOF
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/Akinus21/homebrew-tap.git" "$TAP" 2>/dev/null || exit 0
+          
+          mkdir -p "$TAP/Formula"
+          cat > "$TAP/Formula/akai-agent.rb" <<EOF
+class AkaiAgent < Formula
+  desc "Remote GPU worker agent for the akai-net distributed inference system"
+  homepage "https://github.com/${{ github.repository }}"
+  version "${TAG#v}"
+  license "MIT"
+  depends_on "cmake"
+  depends_on "gcc"
+  depends_on "git"
+  on_linux do
+    url "${BASE}/akai-agent"
+    sha256 "${SHA256}"
+  end
+  def install
+    bin.install "akai-agent" => "akai-agent"
+  end
+  test do
+    assert_match "akai-agent", shell_output("#{bin}/akai-agent --help")
+  end
+end
+EOF
+          cd "$TAP"
           git config user.email "aktags-bot@akinus21.com"
           git config user.name "AkTags Bot"
           git add Formula/akai-agent.rb
-          git commit -m "Update akai-agent to ${TAG}"
-          git push origin master
+          git commit -m "Update akai-agent to ${TAG}" || true
+          git push origin master 2>/dev/null || true
