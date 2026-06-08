@@ -1,9 +1,9 @@
 use crate::types::HubMessage;
 
-pub fn encode_msg(msg: &HubMessage) -> Vec<u8> {
-    let mut data = serde_json::to_vec(msg).unwrap_or_default();
+pub fn encode_msg(msg: &HubMessage) -> Result<Vec<u8>, serde_json::Error> {
+    let mut data = serde_json::to_vec(msg)?;
     data.push(b'\n');
-    data
+    Ok(data)
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {
