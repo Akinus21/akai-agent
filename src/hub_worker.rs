@@ -269,17 +269,17 @@ async fn handle_hub_message(
                 pipeline_guard.num_layers = resp.num_layers;
             }
 
-            let model_changed = !resp.model_name.is_empty()
-                && (resp.model_name != pipeline_guard.model_name
-                    || resp.model_url != pipeline_guard.model_url
-                    || (!resp.model_hash.is_empty() && resp.model_hash != pipeline_guard.model_hash));
-            let _ = model_changed;
+            let model_name_empty = resp.model_name.is_empty();
+            let name_changed = !resp.model_name.is_empty() && resp.model_name != pipeline_guard.model_name;
+            let url_changed = !resp.model_url.is_empty() && resp.model_url != pipeline_guard.model_url;
+            let hash_changed = !resp.model_hash.is_empty() && resp.model_hash != pipeline_guard.model_hash;
+            let model_changed = name_changed || url_changed || hash_changed;
             if model_changed {
-                pipeline_guard.model_name = resp.model_name.clone();
-                pipeline_guard.model_url = resp.model_url.clone();
+                pipeline_guard.model_name.clone_from(&resp.model_name);
+                pipeline_guard.model_url.clone_from(&resp.model_url);
             }
             if !resp.model_hash.is_empty() {
-                pipeline_guard.model_hash = resp.model_hash.clone();
+                pipeline_guard.model_hash.clone_from(&resp.model_hash);
             }
 
             if let Some(pl) = &resp.pipeline {
