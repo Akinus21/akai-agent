@@ -453,9 +453,12 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
     });
 
     // Persistent connection to hub over WireGuard VPN
+    let mut reconnect_delay_secs = 5u64;
+    let max_reconnect_delay = 300u64; // 5 minutes max
     loop {
         match TcpStream::connect(&config.hub_addr).await {
             Ok(stream) => {
+                reconnect_delay_secs = 5; // Reset delay on successful connection
                 info!("Connected to hub at {}", config.hub_addr);
 
                 let (reader, writer) = stream.into_split();
@@ -491,7 +494,8 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                         n = reader.read(&mut tmp) => {
                             match n {
                                 Ok(0) => {
-                                    info!("Hub connection closed, reconnecting...");
+                                    info!("Hub connection closed (will retry in {}s, then increasing)", reconnect_delay_secs);
+                                    reconnect_delay_secs = (reconnect_delay_secs * 2).min(max_reconnect_delay);
                                     break;
                                 }
                                 Ok(n) => {
@@ -957,11 +961,12 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                 }
             }
             Err(e) => {
-                error!("Failed to connect to hub: {}", e);
+                error!("Failed to connect to hub: {} (retrying in {}s)", e, reconnect_delay_secs);
+                reconnect_delay_secs = (reconnect_delay_secs * 2).min(max_reconnect_delay);
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(reconnect_delay_secs)).await;
     }
 }
 
