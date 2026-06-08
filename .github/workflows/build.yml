@@ -309,27 +309,27 @@ jobs:
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/Akinus21/homebrew-tap.git" "$TAP" 2>/dev/null || exit 0
           
           mkdir -p "$TAP/Formula"
-          cat > "$TAP/Formula/akai-agent.rb" <<EOF
-class AkaiAgent < Formula
-  desc "Remote GPU worker agent for the akai-net distributed inference system"
-  homepage "https://github.com/${{ github.repository }}"
-  version "${TAG#v}"
-  license "MIT"
-  depends_on "cmake"
-  depends_on "gcc"
-  depends_on "git"
-  on_linux do
-    url "${BASE}/akai-agent"
-    sha256 "${SHA256}"
-  end
-  def install
-    bin.install "akai-agent" => "akai-agent"
-  end
-  test do
-    assert_match "akai-agent", shell_output("#{bin}/akai-agent --help")
-  end
-end
-EOF
+          printf '%s\n' \
+            'class AkaiAgent < Formula' \
+            '  desc "Remote GPU worker agent for the akai-net distributed inference system"' \
+            '  homepage "https://github.com/Akinus21/akai-agent"' \
+            "  version \"${TAG#v}\"" \
+            '  license "MIT"' \
+            '  depends_on "cmake"' \
+            '  depends_on "gcc"' \
+            '  depends_on "git"' \
+            '  on_linux do' \
+            "    url \"${BASE}/akai-agent\"" \
+            "    sha256 \"${SHA256}\"" \
+            '  end' \
+            '  def install' \
+            '    bin.install "akai-agent" => "akai-agent"' \
+            '  end' \
+            '  test do' \
+            '    assert_match "akai-agent", shell_output("#{bin}/akai-agent --help")' \
+            '  end' \
+            'end' \
+            > "$TAP/Formula/akai-agent.rb"
           cd "$TAP"
           git config user.email "aktags-bot@akinus21.com"
           git config user.name "AkTags Bot"
