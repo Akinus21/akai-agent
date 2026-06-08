@@ -124,9 +124,9 @@ async fn handle_inbound_connection(
             let data = crate::protocol::encode_msg(&response);
             stream.write_all(&data).await?;
         }
-        HubMessage::HeartbeatForward { pipeline } => {
+        HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
             info!("Received HeartbeatForward for worker {}", worker_id);
-            let pipeline_owned = pipeline.clone();
+            let pipeline_owned = pipeline_info.clone();
             let my_id = worker_id.to_string();
             
             if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| w.worker_id == my_id) {
