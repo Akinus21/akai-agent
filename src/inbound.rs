@@ -38,7 +38,7 @@ pub async fn run_inbound_listener(
 
 async fn handle_inbound_connection(
     mut stream: TcpStream,
-    _pipeline: Arc<RwLock<PipelineState>>,
+    pipeline: Arc<RwLock<PipelineState>>,
     worker_id: &str,
 ) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
