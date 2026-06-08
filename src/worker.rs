@@ -518,8 +518,6 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                             info!("[<- hub] HeartbeatForward: pipeline_id={}, {} workers, model={}", 
                                                 pipeline_info.pipeline_id, pipeline_info.workers.len(), pipeline_info.model_name);
                                             
-                                            {
-
                                             let pipeline_owned = pipeline_info.clone();
                                             let my_id = &config.worker_id;
                                             if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| &w.worker_id == my_id) {
@@ -961,10 +959,9 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
             Err(e) => {
                 error!("Failed to connect to hub: {}", e);
             }
-            }
-
-            tokio::time::sleep(Duration::from_secs(5)).await;
         }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
