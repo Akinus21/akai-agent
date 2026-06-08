@@ -3,11 +3,15 @@ mod build;
 mod cli;
 mod config;
 mod gpu;
+mod hub_worker;
+mod inbound;
 mod petals;
+mod protocol;
 mod queue_client;
 mod rpc;
 mod service;
 mod tunnel;
+mod types;
 mod wireguard;
 mod worker;
 
