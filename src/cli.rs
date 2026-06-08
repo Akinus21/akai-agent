@@ -11,6 +11,12 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    #[command(about = "Install akai-agent as a systemd service")]
+    Install,
+
+    #[command(about = "Uninstall the systemd service")]
+    Uninstall,
+
     #[command(about = "Register and start the worker (clean first if flags provided)")]
     Init {
         #[arg(long)]
@@ -36,6 +42,8 @@ pub enum Commands {
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Install => crate::service::install_service(),
+        Commands::Uninstall => crate::service::uninstall_service(),
         Commands::Init { hub, username, api_url } => {
             let has_flags = hub.is_some() || username.is_some() || api_url.is_some();
             if has_flags {
