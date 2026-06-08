@@ -661,22 +661,58 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                         tokio::spawn(async move {
                                                             let model_path = crate::config::data_dir().join("model.gguf");
                                                             let local_hash = file_sha256(&model_path);
-                                                            let hash_matches = local_hash.as_ref().map_or(false, |h| !model_hash_clone.is_empty() && h == &model_hash_clone);
-                                                            let need_download = !model_path.exists() || (model_path.exists() && !hash_matches);
-                                                            let model_changed = !model_path.exists() || !hash_matches;
-
-                                                            if model_changed || need_download {
-                                                                // Kill existing llama-server if running
-                                                                {
-                                                                    let mut llama_guard = llama_child_clone.lock().await;
-                                                                    if let Some(mut old) = llama_guard.take() {
-                                                                        info!("Model changed, stopping llama-server");
-                                                                        old.kill().ok();
+                                                            
+                                                            // Only compare hashes if hub has told us the expected hash
+                                                            // If model_hash_clone is empty, we trust the existing file (if any)
+                                                            let hash_matches = local_hash.as_ref().map_or(false, |h| 
+                                                                !model_hash_clone.is_empty() && h == &model_hash_clone
+                                                            );
+                                                            
+                                                            // Decide if we need to download:
+                                                            // - File missing: download
+                                                            // - Hub knows the hash AND file exists but hash differs: download
+                                                            // - Hub doesn't know the hash (empty) AND file exists: skip (trust existing file)
+                                                            let need_download = if !model_path.exists() {
+                                                                true
+                                                            } else if !model_hash_clone.is_empty() && !hash_matches {
+                                                                true  // Hub gave hash but file doesn't match
+                                                            } else {
+                                                                false  // File exists and either hub doesn't know hash or hash matches
+                                                            };
+                                                            
+                                                            if !need_download {
+                                                                info!("Model file already exists and hash matches (or hub has no hash), skipping download");
+                                                                // Still need to ensure llama-server is running
+                                                                if !pipeline_clone.read().await.llama_server_started {
+                                                                    if let Ok(llama_path) = crate::rpc::ensure_llama_server().await {
+                                                                        let ngl = if has_gpu { -1 } else { 0 };
+                                                                        match crate::rpc::spawn_llama_server(&llama_path, &model_path.to_string_lossy(), ngl, llama_port) {
+                                                                            Ok(llama_cmd) => {
+                                                                                info!("llama-server started on port {}", llama_port);
+                                                                                llama_child_clone.lock().await.replace(llama_cmd);
+                                                                                pipeline_clone.write().await.llama_server_started = true;
+                                                                                notify("akai-agent", &format!("{} ready for inference on port {}", model_name, llama_port));
+                                                                            }
+                                                                            Err(e) => {
+                                                                                error!("Failed to spawn llama-server: {}", e);
+                                                                            }
+                                                                        }
                                                                     }
                                                                 }
-                                                                let mut pipeline_guard = pipeline_clone.write().await;
-                                                                pipeline_guard.llama_server_started = false;
-                                                                drop(pipeline_guard);
+                                                                return;
+                                                            }
+                                                            
+                                                            // Kill existing llama-server if running
+                                                            {
+                                                                let mut llama_guard = llama_child_clone.lock().await;
+                                                                if let Some(mut old) = llama_guard.take() {
+                                                                    info!("Model changed, stopping llama-server");
+                                                                    old.kill().ok();
+                                                                }
+                                                            }
+                                                            let mut pipeline_guard = pipeline_clone.write().await;
+                                                            pipeline_guard.llama_server_started = false;
+                                                            drop(pipeline_guard);
 
                                                                 if model_path.exists() {
                                                                     info!("Deleting old model file");
