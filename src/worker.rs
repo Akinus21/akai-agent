@@ -387,7 +387,6 @@ pub struct PipelineState {
     pub llama_server_started: bool,
     pub rpc_server_started: bool,
     pub setup_started: bool,
-    pub last_pipeline_id: Option<String>,
 }
 
 impl PipelineState {
@@ -409,7 +408,6 @@ impl PipelineState {
             llama_server_started: false,
             rpc_server_started: false,
             setup_started: false,
-            last_pipeline_id: None,
         }
     }
 }
@@ -517,21 +515,10 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
 
                                     match msg {
                                         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
-                                            // Skip duplicate HeartbeatForward (same pipeline_id)
-                                            {
-                                                let pipeline_guard = pipeline.read().await;
-                                                if pipeline_guard.last_pipeline_id.as_deref() == Some(&pipeline_info.pipeline_id) {
-                                                    continue;
-                                                }
-                                            }
-
                                             info!("[<- hub] HeartbeatForward: pipeline_id={}, {} workers, model={}", 
                                                 pipeline_info.pipeline_id, pipeline_info.workers.len(), pipeline_info.model_name);
                                             
                                             {
-                                                let mut pipeline_guard = pipeline.write().await;
-                                                pipeline_guard.last_pipeline_id = Some(pipeline_info.pipeline_id.clone());
-                                            }
 
                                             let pipeline_owned = pipeline_info.clone();
                                             let my_id = &config.worker_id;
@@ -671,11 +658,9 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                                         tokio::spawn(async move {
                                                             let model_path = crate::config::data_dir().join("model.gguf");
                                                             let local_hash = file_sha256(&model_path);
-                                                            let need_download = model_path.exists()
-                                                                && !local_hash.as_ref().map_or(false, |h| !model_hash_clone.is_empty() && h == &model_hash_clone)
-                                                                || !model_path.exists();
-                                                            let model_changed = !model_path.exists()
-                                                                || local_hash.as_ref().map_or(true, |h| !model_hash_clone.is_empty() && h != &model_hash_clone);
+                                                            let hash_matches = local_hash.as_ref().map_or(false, |h| !model_hash_clone.is_empty() && h == &model_hash_clone);
+                                                            let need_download = !model_path.exists() || (model_path.exists() && !hash_matches);
+                                                            let model_changed = !model_path.exists() || !hash_matches;
 
                                                             if model_changed || need_download {
                                                                 // Kill existing llama-server if running
