@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::net::TcpStream;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerInfo {
