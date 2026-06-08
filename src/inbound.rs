@@ -132,7 +132,7 @@ async fn handle_inbound_connection(
             if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| w.worker_id == my_id) {
                 // Send Heartbeat to hub if first or last worker
                 let hub_addr = {
-                    let pipeline_guard = _pipeline.read().await;
+                    let pipeline_guard = pipeline.read().await;
                     pipeline_guard.hub_addr.clone()
                 };
                 
