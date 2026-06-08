@@ -138,8 +138,7 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                             &rpc_child,
                                             &llama_child,
                                         )
-                                        .await
-                                        .ok();
+                                        .await;
                                     }
                                 }
                                 Err(e) => {
@@ -166,8 +165,8 @@ async fn handle_hub_message(
     pipeline: &Arc<RwLock<PipelineState>>,
     writer: &Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
     rpc_child: &Arc<Mutex<Option<std::process::Child>>>,
-    llama_child: &Arc<Mutex<Option<std::process::Child>>,
-) -> Result<(), anyhow::Error> {
+    llama_child: &Arc<Mutex<Option<std::process::Child>>>,
+) {
     match msg {
         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
             info!(
@@ -195,7 +194,7 @@ async fn handle_hub_message(
                         next_hop_connected: true,
                     };
                     let msg = HubMessage::Heartbeat(hb);
-                    let data = encode_msg(&msg)?;
+                    let data = encode_msg(&msg);
                     let mut w = writer.lock().await;
                     w.write_all(&data).await.ok();
                     info!(
@@ -218,7 +217,7 @@ async fn handle_hub_message(
                         next_hop_connected: false,
                     };
                     let msg = HubMessage::Heartbeat(hb);
-                    let data = encode_msg(&msg)?;
+                    let data = encode_msg(&msg);
                     let mut w = writer.lock().await;
                     w.write_all(&data).await.ok();
                     info!(
@@ -242,9 +241,10 @@ async fn handle_hub_message(
                             let msg = HubMessage::HeartbeatForward {
                                 pipeline: pipeline_owned,
                             };
-                            let data = encode_msg(&msg)?;
-                            forward_stream.write_all(&data).await.ok();
-                            info!("[-> {}] HeartbeatForward sent", hop_worker_id);
+                            if let Ok(data) = encode_msg(&msg) {
+                                forward_stream.write_all(&data).await.ok();
+                                info!("[-> {}] HeartbeatForward sent", hop_worker_id);
+                            }
                         }
                         Err(e) => {
                             warn!("[-> {}] HeartbeatForward FAILED: {}", hop_worker_id, e);
@@ -658,7 +658,7 @@ async fn handle_hub_message(
                 },
             };
 
-            let data = encode_msg(&resp_msg)?;
+            let data = encode_msg(&resp_msg);
             let mut w = writer.lock().await;
             w.write_all(&data).await.ok();
         }
@@ -674,7 +674,7 @@ async fn handle_hub_message(
                 info!("[-> {}] Forwarding to next hop at {}", hop.worker_id, addr);
                 match tokio::net::TcpStream::connect(&addr).await {
                     Ok(mut forward_stream) => {
-                        let data = encode_msg(msg)?;
+                        let data = encode_msg(msg);
                         forward_stream.write_all(&data).await.ok();
                     }
                     Err(e) => {
