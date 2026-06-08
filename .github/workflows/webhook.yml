@@ -25,7 +25,7 @@ jobs:
         run: |
           LOG_FILE=""
           for f in /tmp/logs/build.log /tmp/logs/build-errors.txt; do
-            if [ -f "$f" ]; then
+            if [ -f "$f" ] && [ -s "$f" ]; then
               LOG_FILE="$f"
               break
             fi
@@ -33,12 +33,14 @@ jobs:
           if [ -z "$LOG_FILE" ]; then
             mkdir -p /tmp/logs
             RUN_ID="${{ github.event.workflow_run.id }}"
-            LOGS=$(gh run view "$RUN_ID" --log 2>/dev/null || echo "Failed to fetch logs")
-            echo "$LOGS" > /tmp/logs/build.log
+            # Get logs via GitHub API - fetch full run logs as plain text
+            if ! gh run view "$RUN_ID" --log-failed 2>/dev/null > /tmp/logs/build.log; then
+              echo "Failed to fetch logs from GitHub API" > /tmp/logs/build.log
+            fi
             LOG_FILE=/tmp/logs/build.log
           fi
           echo "LOG_FILE=$LOG_FILE" >> $GITHUB_ENV
-          LINES=$(wc -l < "$LOG_FILE")
+          LINES=$(wc -l < "$LOG_FILE" 2>/dev/null || echo "0")
           echo "LOG_LINES=$LINES" >> $GITHUB_ENV
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -47,21 +49,31 @@ jobs:
         id: pasty
         run: |
           LOG_FILE="${{ env.LOG_FILE }}"
-          CONTENT=$(cat "$LOG_FILE" 2>/dev/null || echo "No build logs available")
+          if [ ! -f "$LOG_FILE" ] || [ ! -s "$LOG_FILE" ]; then
+            echo "pasty_ids=" >> $GITHUB_OUTPUT
+            echo "pasty_url=https://paste.akinus21.com/no-logs" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           PASTY_IDS=""
           
-          # Split into 100KB chunks (roughly 50000 chars)
+          # Split into chunks
           SPLIT_LINES=2000
           split -a 3 -l $SPLIT_LINES -d --additional-suffix="" "$LOG_FILE" /tmp/log_chunk_
+          CHUNK_COUNT=$(ls /tmp/log_chunk_* 2>/dev/null | wc -l)
+          echo "Uploading $CHUNK_COUNT chunks to pasty..."
           
           for chunk in /tmp/log_chunk_*; do
-            PAYLOAD=$(cat "$chunk" | jq -Rs '{content: .}')
+            PAYLOAD=$(cat "$chunk" | jq -Rs '{content: .}' 2>/dev/null)
+            if [ -z "$PAYLOAD" ] || [ "$PAYLOAD" = "null" ]; then
+              echo "Failed to create JSON payload for $chunk"
+              continue
+            fi
             PASTE_ID=""
             for i in $(seq 1 30); do
               PASTE_ID=$(printf '%s' "$PAYLOAD" | curl -sS -X POST \
                 -H "Content-Type: application/json" \
                 -d @- \
-                "https://paste.akinus21.com/api/v2/pastes" 2>/dev/null | jq -r '.id // empty')
+                "https://paste.akinus21.com/api/v2/pastes" 2>/dev/null | jq -r '.id // empty' 2>/dev/null)
               if [ -n "$PASTE_ID" ] && [ "$PASTE_ID" != "null" ]; then
                 echo "Uploaded chunk $chunk -> $PASTE_ID"
                 break
@@ -76,30 +88,34 @@ jobs:
             fi
           done
           
+          if [ -z "$PASTY_IDS" ]; then
+            PASTY_IDS="upload-failed"
+          fi
           echo "pasty_ids=$PASTY_IDS" >> $GITHUB_OUTPUT
-          echo "pasty_url=https://paste.akinus21.com/${PASTY_IDS%%,*}" >> $GITHUB_OUTPUT
+          FIRST_ID="${PASTY_IDS%%,*}"
+          echo "pasty_url=https://paste.akinus21.com/${FIRST_ID}" >> $GITHUB_OUTPUT
 
       - name: Extract error context (max 25 lines)
         id: errors
         run: |
           LOG_FILE="${{ env.LOG_FILE }}"
-          if [ -z "$LOG_FILE" ] || [ ! -f "$LOG_FILE" ]; then
+          if [ -z "$LOG_FILE" ] || [ ! -f "$LOG_FILE" ] || [ ! -s "$LOG_FILE" ]; then
             echo "error_context=Build failed. No detailed logs available." >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          # Find error lines
-          ERROR_LINES=$(grep -n -iE '^error\[|^error:|error\[E[0-9]+\]|fatal error|cannot find|undefined|expected.*but found|expected$|not found in this scope|unresolved|missing|compilation failed|build failed' "$LOG_FILE" 2>/dev/null | head -5 | cut -d: -f1)
+          # Find error lines with better patterns
+          ERROR_LINES=$(grep -n -iE '^error\[E[0-9]+\]|^error:|fatal error|cannot find|undefined|expected.*but found|not found in this scope|unresolved|compilation failed|build failed' "$LOG_FILE" 2>/dev/null | head -5 | cut -d: -f1)
           
           if [ -z "$ERROR_LINES" ]; then
             # No rustc errors found, just take last 25 lines of build output
-            CONTEXT=$(tail -25 "$LOG_FILE")
+            CONTEXT=$(tail -25 "$LOG_FILE" 2>/dev/null)
           else
-            # Extract context around each error (up to 5 lines before/after each)
+            # Extract context around each error (up to 3 lines before/after each)
             CONTEXT=""
             for LINE in $ERROR_LINES; do
-              START=$((LINE - 5))
-              END=$((LINE + 5))
+              START=$((LINE - 3))
+              END=$((LINE + 3))
               [ $START -lt 1 ] && START=1
               CHUNK=$(sed -n "${START},${END}p" "$LOG_FILE" 2>/dev/null)
               CONTEXT="${CONTEXT}
@@ -107,8 +123,11 @@ jobs:
 ${CHUNK}"
             done
             # Limit to 25 lines total
-            CONTEXT=$(echo "$CONTEXT" | tail -25)
+            CONTEXT=$(echo "$CONTEXT" | tail -25 | head -25)
           fi
+          
+          # Final safety: ensure we don't exceed 25 lines
+          CONTEXT=$(echo "$CONTEXT" | head -25)
           
           echo "error_context<<EOF" >> $GITHUB_OUTPUT
           echo "$CONTEXT" >> $GITHUB_OUTPUT
