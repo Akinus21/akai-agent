@@ -24,16 +24,16 @@ const ATOMIC_INSTALL_DIR: &str = "/var/lib/akai-agent/bin";
 const ATOMIC_DATA_DIR: &str = "/var/lib/akai-agent/data";
 
 fn find_akai_agent() -> Option<String> {
-    let search_paths = if is_ostree() {
+    let search_paths: Vec<String> = if is_ostree() {
         vec![
-            "/usr/local/bin/akai-agent",
-            "/usr/bin/akai-agent",
+            "/usr/local/bin/akai-agent".to_string(),
+            "/usr/bin/akai-agent".to_string(),
             format!("{}/akai-agent", ATOMIC_INSTALL_DIR),
         ]
     } else {
         vec![
-            "/usr/local/bin/akai-agent",
-            "/usr/bin/akai-agent",
+            "/usr/local/bin/akai-agent".to_string(),
+            "/usr/bin/akai-agent".to_string(),
         ]
     };
 

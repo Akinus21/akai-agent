@@ -2,8 +2,6 @@ mod systemd;
 mod launchd;
 mod windows;
 
-pub use systemd::{install, uninstall};
-
 pub fn install_service() -> anyhow::Result<()> {
     match std::env::consts::OS {
         "linux" => systemd::install(),
