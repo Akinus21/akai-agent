@@ -138,7 +138,8 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
                                             &rpc_child,
                                             &llama_child,
                                         )
-                                        .await;
+                                        .await
+                                        .ok();
                                     }
                                 }
                                 Err(e) => {
@@ -165,8 +166,8 @@ async fn handle_hub_message(
     pipeline: &Arc<RwLock<PipelineState>>,
     writer: &Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
     rpc_child: &Arc<Mutex<Option<std::process::Child>>>,
-    llama_child: &Arc<Mutex<Option<std::process::Child>>>,
-) {
+    llama_child: &Arc<Mutex<Option<std::process::Child>>,
+) -> Result<(), anyhow::Error> {
     match msg {
         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
             info!(
