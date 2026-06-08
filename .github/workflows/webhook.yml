@@ -54,38 +54,44 @@ jobs:
             echo "pasty_url=https://paste.akinus21.com/no-logs" >> $GITHUB_OUTPUT
             exit 0
           fi
+          
+          # Get content - if too large, upload in chunks using line ranges
+          TOTAL_LINES=$(wc -l < "$LOG_FILE")
+          echo "Log file has $TOTAL_LINES lines"
+          
           PASTY_IDS=""
+          CHUNK_SIZE=2000
           
-          # Split into chunks
-          SPLIT_LINES=2000
-          split -a 3 -l $SPLIT_LINES -d --additional-suffix="" "$LOG_FILE" /tmp/log_chunk_
-          CHUNK_COUNT=$(ls /tmp/log_chunk_* 2>/dev/null | wc -l)
-          echo "Uploading $CHUNK_COUNT chunks to pasty..."
-          
-          for chunk in /tmp/log_chunk_*; do
-            PAYLOAD=$(cat "$chunk" | jq -Rs '{content: .}' 2>/dev/null)
-            if [ -z "$PAYLOAD" ] || [ "$PAYLOAD" = "null" ]; then
-              echo "Failed to create JSON payload for $chunk"
+          for ((START=1; START<=TOTAL_LINES; START+=CHUNK_SIZE)); do
+            END=$((START + CHUNK_SIZE - 1))
+            [ $END -gt $TOTAL_LINES ] && END=$TOTAL_LINES
+            
+            CHUNK=$(sed -n "${START},${END}p" "$LOG_FILE" 2>/dev/null || echo "")
+            
+            # Use base64 encoding to avoid JSON escaping issues
+            CHUNK_B64=$(printf '%s' "$CHUNK" | base64 2>/dev/null | tr -d '\n')
+            PAYLOAD=$(jq -n --arg content "$CHUNK_B64" '{content: @base64($content)}' 2>/dev/null)
+            
+            if [ -z "$PAYLOAD" ]; then
+              echo "Failed to create JSON payload for lines $START-$END"
               continue
             fi
+            
             PASTE_ID=""
             for i in $(seq 1 30); do
-              PASTE_ID=$(printf '%s' "$PAYLOAD" | curl -sS -X POST \
+              RESPONSE=$(printf '%s' "$PAYLOAD" | curl -sS -X POST \
                 -H "Content-Type: application/json" \
                 -d @- \
-                "https://paste.akinus21.com/api/v2/pastes" 2>/dev/null | jq -r '.id // empty' 2>/dev/null)
+                "https://paste.akinus21.com/api/v2/pastes" 2>/dev/null)
+              PASTE_ID=$(printf '%s' "$RESPONSE" | jq -r '.id // empty' 2>/dev/null)
               if [ -n "$PASTE_ID" ] && [ "$PASTE_ID" != "null" ]; then
-                echo "Uploaded chunk $chunk -> $PASTE_ID"
+                echo "Uploaded lines $START-$END -> $PASTE_ID"
                 break
               fi
-              echo "Pasty upload attempt $i failed for $chunk, retrying in 3s..."
+              echo "Pasty upload attempt $i failed for lines $START-$END, retrying in 3s..."
               sleep 3
             done
-            if [ -n "$PASTE_ID" ] && [ "$PASTE_ID" != "null" ]; then
-              PASTY_IDS="${PASTY_IDS}${PASTY_IDS:+,}$PASTE_ID"
-            else
-              echo "Failed to upload chunk $chunk after 30 attempts"
-            fi
+            [ -n "$PASTE_ID" ] && [ "$PASTE_ID" != "null" ] && PASTY_IDS="${PASTY_IDS}${PASTY_IDS:+,}$PASTE_ID"
           done
           
           if [ -z "$PASTY_IDS" ]; then
