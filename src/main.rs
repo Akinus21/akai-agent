@@ -9,6 +9,7 @@ mod petals;
 mod protocol;
 mod queue_client;
 mod rpc;
+mod rpc_client;
 mod service;
 mod tunnel;
 mod types;

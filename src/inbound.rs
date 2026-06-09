@@ -108,32 +108,76 @@ async fn handle_inbound_connection(
         }
         HubMessage::InferenceForward(fwd) => {
             info!("Received InferenceForward from {} to {}", fwd.from_worker, fwd.to_worker);
+            
             let hidden_states: Vec<f32> = fwd.data
                 .chunks_exact(4)
                 .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                 .collect();
             
-            let response = HubMessage::InferenceResponse(crate::types::InferenceResponse {
-                id: fwd.id,
-                token: None,
-                hidden_states: Some(hidden_states),
-                is_done: true,
-                text: None,
-                prompt_tokens: 0,
-                completion_tokens: 0,
-            });
-            let data = crate::protocol::encode_msg(&response);
+            info!("[self] Processing {} hidden states from previous worker", hidden_states.len());
             
-            if let Some(ref hub_addr) = fwd.hub_addr {
-                info!("[-> hub] Sending response directly to hub at {}", hub_addr);
-                if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(hub_addr).await {
-                    hub_stream.write_all(&data).await.ok();
-                    info!("[-> hub] Response sent to hub");
-                } else {
-                    warn!("Failed to connect to hub at {}", hub_addr);
+            let rpc_port = 50053;
+            let client = crate::rpc_client::RpcClient::new("127.0.0.1", rpc_port);
+            
+            match client.forward(vec![], Some(hidden_states)).await {
+                Ok((tokens, new_hidden_states)) => {
+                    info!("[rpc] forward done, new hidden_states len: {}", new_hidden_states.len());
+                    
+                    let hidden_bytes: Vec<u8> = new_hidden_states.iter()
+                        .flat_map(|f| f.to_le_bytes())
+                        .collect();
+                    
+                    let pipeline_guard = pipeline.read().await;
+                    let is_last = pipeline_guard.is_last;
+                    let next_hop = pipeline_guard.next_hop.clone();
+                    let hub_addr = pipeline_guard.hub_addr.clone();
+                    drop(pipeline_guard);
+                    
+                    if is_last {
+                        info!("[self] is last worker, generating final output");
+                        match client.generate(tokens, 128, 0.7).await {
+                            Ok((_, text)) => {
+                                info!("[rpc] generate done, text: {} chars", text.len());
+                                let response = HubMessage::InferenceResponse(crate::types::InferenceResponse {
+                                    id: fwd.id,
+                                    token: None,
+                                    hidden_states: None,
+                                    is_done: true,
+                                    text: Some(text),
+                                    prompt_tokens: 0,
+                                    completion_tokens: 0,
+                                });
+                                let data = crate::protocol::encode_msg(&response);
+                                if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(&hub_addr).await {
+                                    hub_stream.write_all(&data).await.ok();
+                                    info!("[-> hub] Final response sent to hub");
+                                }
+                            }
+                            Err(e) => {
+                                error!("[rpc] generate failed: {}", e);
+                            }
+                        }
+                    } else if let Some(ref hop) = next_hop {
+                        info!("[-> {}] Forwarding {} hidden states to next worker", hop.worker_id, new_hidden_states.len());
+                        let fwd_msg = HubMessage::InferenceForward(crate::types::InferenceForward {
+                            id: fwd.id,
+                            from_worker: worker_id.clone(),
+                            to_worker: hop.worker_id.clone(),
+                            data: hidden_bytes,
+                            hub_addr: Some(hub_addr),
+                        });
+                        let data = crate::protocol::encode_msg(&fwd_msg);
+                        if let Ok(mut forward_stream) = tokio::net::TcpStream::connect(format!("{}:{}", hop.host, hop.port)).await {
+                            forward_stream.write_all(&data).await.ok();
+                            info!("[-> {}] Forwarded to next worker", hop.worker_id);
+                        } else {
+                            warn!("Failed to forward to next worker");
+                        }
+                    }
                 }
-            } else {
-                stream.write_all(&data).await.ok();
+                Err(e) => {
+                    error!("[rpc] forward failed: {}", e);
+                }
             }
         }
         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {

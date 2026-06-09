@@ -13,7 +13,7 @@ use crate::types::{
     HubMessage, HubWorkerConfig, InferenceForward, InferenceResponse,
     PipelineState, WorkerHeartbeat, WorkerInfo,
 };
-use crate::{inbound, rpc};
+use crate::{inbound, rpc, rpc_client};
 
 pub fn notify(title: &str, body: &str) {
     info!("[notify] {}: {}", title, body);
@@ -364,7 +364,10 @@ async fn handle_hub_message(
                             }
                         }
 
-                        match rpc::spawn_rpc_server(&rpc_path, config.rpc_port + 1) {
+                        let layer_offset = pipeline_guard.layer_offset;
+                        let num_layers = pipeline_guard.num_layers;
+                        
+                        match rpc::spawn_rpc_server(&rpc_path, config.rpc_port + 1, layer_offset, num_layers) {
                             Ok(child) => {
                                 rpc_child.lock().await.replace(child);
                                 info!("rpc-server started on port {}", config.rpc_port + 1);
@@ -671,141 +674,128 @@ async fn handle_hub_message(
             let next_hop = pipeline_guard.next_hop.clone();
             let layer_offset = pipeline_guard.layer_offset;
             let num_layers = pipeline_guard.num_layers;
+            let rpc_server_started = pipeline_guard.rpc_server_started;
             drop(pipeline_guard);
 
-            info!("[self] is_first={}, is_last={}, layers={}-{}", 
-                is_first, is_last, layer_offset, layer_offset + num_layers);
+            info!("[self] is_first={}, is_last={}, layers={}-{}, rpc_server_started={}", 
+                is_first, is_last, layer_offset, layer_offset + num_layers, rpc_server_started);
 
-            let llama_port = config.llama_port;
-            let client = reqwest::Client::new();
-            let llm_url = format!("http://127.0.0.1:{}/v1/chat/completions", llama_port);
+            if !rpc_server_started {
+                error!("[self] rpc-server not started, cannot process inference");
+                let resp_msg = HubMessage::Error {
+                    code: "NOT_READY".to_string(),
+                    message: "rpc-server not started".to_string(),
+                };
+                let data = encode_msg(&resp_msg);
+                let mut w = writer.lock().await;
+                w.write_all(&data).await.ok();
+                return;
+            }
 
+            let rpc_port = config.rpc_port + 1;
+            let client = rpc_client::RpcClient::new("127.0.0.1", rpc_port);
+            
             let prompt = req.prompt.clone().unwrap_or_default();
             let max_tokens = req.max_new_tokens;
             let temperature = req.temperature;
 
-            let body = serde_json::json!({
-                "model": "local",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "stream": false
-            });
-
-            match client
-                .post(&llm_url)
-                .json(&body)
-                .timeout(std::time::Duration::from_secs(120))
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    if resp.status().is_success() {
-                        if let Ok(json) = resp.json::<serde_json::Value>().await {
-                            let content = json["choices"][0]["message"]["content"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string();
-                            
-                            info!("[llama] response text length: {} chars", content.len());
-                            
-                            if is_last {
-                                info!("[self] is last worker, sending response to hub");
-                                let resp_msg = HubMessage::InferenceResponse(InferenceResponse {
-                                    id: req.id.clone(),
-                                    token: None,
-                                    hidden_states: None,
-                                    is_done: true,
-                                    text: Some(content),
-                                    prompt_tokens: 0,
-                                    completion_tokens: 0,
-                                });
-                                let data = encode_msg(&resp_msg);
-                                let mut w = writer.lock().await;
-                                w.write_all(&data).await.ok();
-                            } else if is_first {
-                                info!("[self] is first worker (full model), sending response to hub directly");
-                                let resp_msg = HubMessage::InferenceResponse(InferenceResponse {
-                                    id: req.id.clone(),
-                                    token: None,
-                                    hidden_states: None,
-                                    is_done: true,
-                                    text: Some(content),
-                                    prompt_tokens: 0,
-                                    completion_tokens: 0,
-                                });
-                                let data = encode_msg(&resp_msg);
-                                let mut w = writer.lock().await;
-                                w.write_all(&data).await.ok();
-                            } else if let Some(ref hop) = next_hop {
-                                info!("[-> {}] Forwarding to next worker at {}:{}", hop.worker_id, hop.host, hop.port);
-                                let fwd = HubMessage::InferenceForward(InferenceForward {
-                                    id: req.id.clone(),
-                                    from_worker: config.worker_id.clone(),
-                                    to_worker: hop.worker_id.clone(),
-                                    data: content.into_bytes(),
-                                    hub_addr: Some(config.hub_addr.clone()),
-                                });
-                                let data = encode_msg(&fwd);
-                                match tokio::net::TcpStream::connect(format!("{}:{}", hop.host, hop.port)).await {
-                                    Ok(mut forward_stream) => {
-                                        forward_stream.write_all(&data).await.ok();
-                                        info!("[-> {}] Forwarded to next worker", hop.worker_id);
-                                    }
-                                    Err(e) => {
-                                        error!("[-> {}] Forward failed: {}", hop.worker_id, e);
-                                        let resp_msg = HubMessage::Error {
-                                            code: "FORWARD_ERROR".to_string(),
-                                            message: format!("Failed to forward to {}: {}", hop.worker_id, e),
-                                        };
-                                        let data = encode_msg(&resp_msg);
-                                        let mut w = writer.lock().await;
-                                        w.write_all(&data).await.ok();
-                                    }
-                                }
-                            } else {
-                                info!("[self] no next_hop configured, sending response to hub");
-                                let resp_msg = HubMessage::InferenceResponse(InferenceResponse {
-                                    id: req.id.clone(),
-                                    token: None,
-                                    hidden_states: None,
-                                    is_done: true,
-                                    text: Some(content),
-                                    prompt_tokens: 0,
-                                    completion_tokens: 0,
-                                });
-                                let data = encode_msg(&resp_msg);
-                                let mut w = writer.lock().await;
-                                w.write_all(&data).await.ok();
-                            }
-                        } else {
-                            let resp_msg = HubMessage::Error {
-                                code: "JSON_ERROR".to_string(),
-                                message: "Failed to parse LLM response".to_string(),
-                            };
-                            let data = encode_msg(&resp_msg);
-                            let mut w = writer.lock().await;
-                            w.write_all(&data).await.ok();
-                        }
-                    } else {
+            if is_last {
+                info!("[self] last worker, running full generate");
+                match client.generate(vec![], max_tokens, temperature).await {
+                    Ok((tokens, text)) => {
+                        info!("[rpc] generate done, text length: {} chars, tokens: {}", text.len(), tokens.len());
+                        let resp_msg = HubMessage::InferenceResponse(InferenceResponse {
+                            id: req.id.clone(),
+                            token: None,
+                            hidden_states: None,
+                            is_done: true,
+                            text: Some(text),
+                            prompt_tokens: 0,
+                            completion_tokens: tokens.len() as u64,
+                        });
+                        let data = encode_msg(&resp_msg);
+                        let mut w = writer.lock().await;
+                        w.write_all(&data).await.ok();
+                    }
+                    Err(e) => {
+                        error!("[rpc] generate failed: {}", e);
                         let resp_msg = HubMessage::Error {
-                            code: "HTTP_ERROR".to_string(),
-                            message: format!("LLM request failed: {}", resp.status()),
+                            code: "RPC_ERROR".to_string(),
+                            message: e.to_string(),
                         };
                         let data = encode_msg(&resp_msg);
                         let mut w = writer.lock().await;
                         w.write_all(&data).await.ok();
                     }
                 }
-                Err(e) => {
-                    let resp_msg = HubMessage::Error {
-                        code: "REQUEST_ERROR".to_string(),
-                        message: e.to_string(),
-                    };
-                    let data = encode_msg(&resp_msg);
-                    let mut w = writer.lock().await;
-                    w.write_all(&data).await.ok();
+            } else if is_first {
+                info!("[self] first worker, running forward pass to get hidden states");
+                match client.forward(vec![], None).await {
+                    Ok((tokens, hidden_states)) => {
+                        info!("[rpc] forward done, hidden_states len: {}, tokens: {}", hidden_states.len(), tokens.len());
+                        
+                        let hidden_bytes: Vec<u8> = hidden_states.iter()
+                            .flat_map(|f| f.to_le_bytes())
+                            .collect();
+                        
+                        if let Some(ref hop) = next_hop {
+                            info!("[-> {}] Forwarding hidden states ({} bytes) to next worker at {}:{}", 
+                                hop.worker_id, hidden_bytes.len(), hop.host, hop.port);
+                            let fwd = HubMessage::InferenceForward(InferenceForward {
+                                id: req.id.clone(),
+                                from_worker: config.worker_id.clone(),
+                                to_worker: hop.worker_id.clone(),
+                                data: hidden_bytes,
+                                hub_addr: Some(config.hub_addr.clone()),
+                            });
+                            let data = encode_msg(&fwd);
+                            match tokio::net::TcpStream::connect(format!("{}:{}", hop.host, hop.port)).await {
+                                Ok(mut forward_stream) => {
+                                    forward_stream.write_all(&data).await.ok();
+                                    info!("[-> {}] Forwarded to next worker", hop.worker_id);
+                                }
+                                Err(e) => {
+                                    error!("[-> {}] Forward failed: {}", hop.worker_id, e);
+                                    let resp_msg = HubMessage::Error {
+                                        code: "FORWARD_ERROR".to_string(),
+                                        message: format!("Failed to forward to {}: {}", hop.worker_id, e),
+                                    };
+                                    let data = encode_msg(&resp_msg);
+                                    let mut w = writer.lock().await;
+                                    w.write_all(&data).await.ok();
+                                }
+                            }
+                        } else {
+                            error!("[self] no next_hop configured but not last worker!");
+                            let resp_msg = HubMessage::Error {
+                                code: "NO_NEXT_HOP".to_string(),
+                                message: "Missing next_hop for non-last worker".to_string(),
+                            };
+                            let data = encode_msg(&resp_msg);
+                            let mut w = writer.lock().await;
+                            w.write_all(&data).await.ok();
+                        }
+                    }
+                    Err(e) => {
+                        error!("[rpc] forward failed: {}", e);
+                        let resp_msg = HubMessage::Error {
+                            code: "RPC_ERROR".to_string(),
+                            message: e.to_string(),
+                        };
+                        let data = encode_msg(&resp_msg);
+                        let mut w = writer.lock().await;
+                        w.write_all(&data).await.ok();
+                    }
                 }
+            } else {
+                info!("[self] middle worker, expecting hidden states from previous worker");
+                let resp_msg = HubMessage::Error {
+                    code: "NOT_IMPLEMENTED".to_string(),
+                    message: "Middle worker handling not yet implemented".to_string(),
+                };
+                let data = encode_msg(&resp_msg);
+                let mut w = writer.lock().await;
+                w.write_all(&data).await.ok();
             }
         }
 
