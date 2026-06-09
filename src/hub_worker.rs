@@ -179,6 +179,14 @@ async fn handle_hub_message(
             let pipeline_owned = pipeline_info.clone();
             let my_id = &config.worker_id;
             if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| &w.worker_id == my_id) {
+                {
+                    let mut pipeline_guard = pipeline.write().await;
+                    pipeline_guard.is_first = my_worker.is_first;
+                    pipeline_guard.is_last = my_worker.is_last;
+                    pipeline_guard.layer_offset = my_worker.layer_offset;
+                    pipeline_guard.num_layers = my_worker.num_layers;
+                }
+                
                 if my_worker.is_first {
                     info!("[self] first worker in pipeline, sending Heartbeat back to hub");
                     let pipeline_guard = pipeline.read().await;
