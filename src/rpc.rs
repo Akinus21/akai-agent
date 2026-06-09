@@ -297,20 +297,13 @@ pub async fn download_latest() -> Result<()> {
     Ok(())
 }
 
-pub fn spawn_rpc_server(binary: &Path, port: u16, layer_offset: usize, num_layers: usize) -> Result<std::process::Child> {
+pub fn spawn_rpc_server(binary: &Path, port: u16, _layer_offset: usize, _num_layers: usize) -> Result<std::process::Child> {
     let binary = binary.to_path_buf();
     let lib_dir = crate::config::data_dir().join("lib");
 
     let mut cmd = std::process::Command::new(&binary);
     cmd.arg("--host").arg("0.0.0.0")
        .arg("--port").arg(port.to_string());
-    
-    if layer_offset > 0 {
-        cmd.arg("--offset-layers").arg(layer_offset.to_string());
-    }
-    if num_layers > 0 {
-        cmd.arg("--n-layers").arg(num_layers.to_string());
-    }
 
     #[cfg(target_os = "linux")]
     {
