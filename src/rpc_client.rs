@@ -61,7 +61,7 @@ impl RpcClient {
         let mut stream = TcpStream::connect(&self.addr).await?;
         
         // Send HELLO first (rpc-server expects this as first message)
-        stream.write_all(b"hello\n").await?;
+        stream.write_all(b"hello").await?;
         
         let req = RpcRequest::Init {
             model_path: model_path.to_string(),
@@ -98,7 +98,7 @@ impl RpcClient {
 
     pub async fn forward(&self, tokens: Vec<i64>, hidden_states: Option<Vec<f32>>) -> Result<(Vec<i64>, Vec<f32>)> {
         let mut stream = TcpStream::connect(&self.addr).await?;
-        stream.write_all(b"hello\n").await?;
+        stream.write_all(b"hello").await?;
         
         let req = RpcRequest::Forward { tokens, hidden_states };
         let data = Self::serialize_req(&req)?;
@@ -129,7 +129,7 @@ impl RpcClient {
 
     pub async fn generate(&self, tokens: Vec<i64>, max_new_tokens: usize, temperature: f32) -> Result<(Vec<i64>, String)> {
         let mut stream = TcpStream::connect(&self.addr).await?;
-        stream.write_all(b"hello\n").await?;
+        stream.write_all(b"hello").await?;
         
         let req = RpcRequest::Generate {
             tokens,
