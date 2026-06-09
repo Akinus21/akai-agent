@@ -406,9 +406,8 @@ async fn handle_hub_message(
                         let pipeline_clone = pipeline.clone();
                         let model_hash_clone = pipeline_guard.model_hash.clone();
                         let llama_child_clone = llama_child.clone();
-
+                        let rpc_port = config.rpc_port + 1;
                         tokio::spawn(async move {
-                            let model_path = data_dir().join("model.gguf");
                             let local_hash = file_sha256(&model_path);
 
                             let hash_matches = local_hash.as_ref().map_or(false, |h| {
@@ -625,7 +624,6 @@ async fn handle_hub_message(
                                                     pipeline_guard.ready_for_inference = true;
                                                     drop(pipeline_guard);
 
-                                                    let rpc_port = config.rpc_port + 1;
                                                     let rpc_path = rpc::rpc_binary_path();
                                                     if !rpc_path.exists() {
                                                         rpc::ensure_rpc_server().await.ok();
