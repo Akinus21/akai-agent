@@ -408,6 +408,7 @@ async fn handle_hub_message(
                         let llama_child_clone = llama_child.clone();
                         let rpc_port = config.rpc_port + 1;
                         tokio::spawn(async move {
+                            let model_path = data_dir().join("model.gguf");
                             let local_hash = file_sha256(&model_path);
 
                             let hash_matches = local_hash.as_ref().map_or(false, |h| {
