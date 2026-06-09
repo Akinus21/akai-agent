@@ -161,7 +161,7 @@ async fn handle_inbound_connection(
                         info!("[-> {}] Forwarding {} hidden states to next worker", hop.worker_id, new_hidden_states.len());
                         let fwd_msg = HubMessage::InferenceForward(crate::types::InferenceForward {
                             id: fwd.id,
-                            from_worker: worker_id.clone(),
+                            from_worker: worker_id.to_string(),
                             to_worker: hop.worker_id.clone(),
                             data: hidden_bytes,
                             hub_addr: Some(hub_addr),
