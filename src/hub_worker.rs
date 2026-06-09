@@ -401,6 +401,7 @@ async fn handle_hub_message(
                         let model_name = pipeline_guard.model_name.clone();
                         let has_gpu = config.has_gpu;
                         let llama_port = config.llama_port;
+                        let rpc_port = config.rpc_port;
                         let layer_offset = pipeline_guard.layer_offset;
                         let num_layers = pipeline_guard.num_layers;
                         let pipeline_clone = pipeline.clone();
