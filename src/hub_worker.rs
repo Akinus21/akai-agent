@@ -723,6 +723,20 @@ async fn handle_hub_message(
                                 let data = encode_msg(&resp_msg);
                                 let mut w = writer.lock().await;
                                 w.write_all(&data).await.ok();
+                            } else if is_first {
+                                info!("[self] is first worker (full model), sending response to hub directly");
+                                let resp_msg = HubMessage::InferenceResponse(InferenceResponse {
+                                    id: req.id.clone(),
+                                    token: None,
+                                    hidden_states: None,
+                                    is_done: true,
+                                    text: Some(content),
+                                    prompt_tokens: 0,
+                                    completion_tokens: 0,
+                                });
+                                let data = encode_msg(&resp_msg);
+                                let mut w = writer.lock().await;
+                                w.write_all(&data).await.ok();
                             } else if let Some(ref hop) = next_hop {
                                 info!("[-> {}] Forwarding to next worker at {}:{}", hop.worker_id, hop.host, hop.port);
                                 let fwd = HubMessage::InferenceForward(InferenceForward {
