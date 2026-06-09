@@ -407,6 +407,7 @@ async fn handle_hub_message(
                         let pipeline_clone = pipeline.clone();
                         let model_hash_clone = pipeline_guard.model_hash.clone();
                         let llama_child_clone = llama_child.clone();
+                        let rpc_child_clone = rpc_child.clone();
 
                         tokio::spawn(async move {
                             let model_path = data_dir().join("model.gguf");
