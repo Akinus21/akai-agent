@@ -272,9 +272,16 @@ async fn handle_hub_message(
 
             let mut pipeline_guard = pipeline.write().await;
 
+            let layers_changed = resp.reassign && (resp.layer_offset != pipeline_guard.layer_offset || resp.num_layers != pipeline_guard.num_layers);
+            
             if resp.reassign || pipeline_guard.num_layers == 0 {
                 pipeline_guard.layer_offset = resp.layer_offset;
                 pipeline_guard.num_layers = resp.num_layers;
+                if layers_changed {
+                    info!("Layer assignment changed, resetting setup state");
+                    pipeline_guard.setup_started = false;
+                    pipeline_guard.llama_server_started = false;
+                }
             }
 
             let model_name_empty = resp.model_name.is_empty();
@@ -341,7 +348,7 @@ async fn handle_hub_message(
                         }
                     }
 
-                    if pipeline_guard.is_first
+                    if pipeline_guard.num_layers > 0
                         && !pipeline_guard.model_url.is_empty()
                         && !pipeline_guard.setup_started
                     {
