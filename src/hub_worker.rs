@@ -635,7 +635,8 @@ async fn handle_hub_message(
                                                             info!("rpc-server spawned on port {}", rpc_port);
                                                             let mp = model_path.to_string_lossy().to_string();
                                                             let pc = pipeline_clone.clone();
-                                                            tokio::spawn(async move {
+tokio::spawn(async move {
+                            let model_path = data_dir().join("model.gguf");
                                                                 tokio::time::sleep(Duration::from_secs(2)).await;
                                                                 let client = rpc_client::RpcClient::new("127.0.0.1", rpc_port);
                                                                 if client.init(&mp, layer_offset, num_layers).await.is_ok() {
