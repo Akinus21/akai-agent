@@ -406,7 +406,7 @@ async fn handle_hub_message(
                         let pipeline_clone = pipeline.clone();
                         let model_hash_clone = pipeline_guard.model_hash.clone();
                         let llama_child_clone = llama_child.clone();
-                        let rpc_port = config.rpc_port + 1;
+
                         tokio::spawn(async move {
                             let model_path = data_dir().join("model.gguf");
                             let local_hash = file_sha256(&model_path);
@@ -625,6 +625,7 @@ async fn handle_hub_message(
                                                     pipeline_guard.ready_for_inference = true;
                                                     drop(pipeline_guard);
 
+                                                    let rpc_port = config.rpc_port + 1;
                                                     let rpc_path = rpc::rpc_binary_path();
                                                     if !rpc_path.exists() {
                                                         rpc::ensure_rpc_server().await.ok();
@@ -633,14 +634,12 @@ async fn handle_hub_message(
                                                     match rpc::spawn_rpc_server(&rpc_path, rpc_port, layer_offset, num_layers) {
                                                         Ok(child) => {
                                                             rc.lock().await.replace(child);
-                                                            info!("rpc-server spawned on port {}", rpc_port);
                                                             let mp = model_path.to_string_lossy().to_string();
                                                             let pc = pipeline_clone.clone();
-tokio::spawn(async move {
-                            let model_path = data_dir().join("model.gguf");
+                                                            tokio::spawn(async move {
                                                                 tokio::time::sleep(Duration::from_secs(2)).await;
-                                                                let client = rpc_client::RpcClient::new("127.0.0.1", rpc_port);
-                                                                if client.init(&mp, layer_offset, num_layers).await.is_ok() {
+                                                                let c = rpc_client::RpcClient::new("127.0.0.1", rpc_port);
+                                                                if c.init(&mp, layer_offset, num_layers).await.is_ok() {
                                                                     let mut g = pc.write().await;
                                                                     g.rpc_server_started = true;
                                                                     g.ready_for_inference = true;
