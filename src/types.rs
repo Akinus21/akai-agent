@@ -180,6 +180,8 @@ pub struct PipelineState {
     pub rpc_server_started: bool,
     pub setup_started: bool,
     pub ready_for_inference: bool,
+    pub loaded_layer_offset: Option<usize>,
+    pub loaded_num_layers: Option<usize>,
 }
 
 impl PipelineState {
@@ -203,6 +205,8 @@ impl PipelineState {
             rpc_server_started: false,
             setup_started: false,
             ready_for_inference: false,
+            loaded_layer_offset: None,
+            loaded_num_layers: None,
         }
     }
 }

@@ -232,11 +232,16 @@ async fn handle_hub_message(
             if is_first {
                 info!("[self] first worker in pipeline, sending Heartbeat back to hub");
                 let pipeline_guard = pipeline.read().await;
+                let (reported_offset, reported_num) = if let (Some(o), Some(n)) = (pipeline_guard.loaded_layer_offset, pipeline_guard.loaded_num_layers) {
+                    (o, n)
+                } else {
+                    (pipeline_guard.layer_offset, pipeline_guard.num_layers)
+                };
                 let hb = WorkerHeartbeat {
                     worker_id: config.worker_id.clone(),
                     load: 0.0,
-                    layer_offset: pipeline_guard.layer_offset,
-                    num_layers: pipeline_guard.num_layers,
+                    layer_offset: reported_offset,
+                    num_layers: reported_num,
                     has_gpu: config.has_gpu,
                     vram_gb: config.vram_gb,
                     active: true,
@@ -249,17 +254,22 @@ async fn handle_hub_message(
                 w.write_all(&data).await.ok();
                 info!(
                     "[-> hub] Heartbeat: layers {}-{}, active=true",
-                    pipeline_guard.layer_offset,
-                    pipeline_guard.layer_offset + pipeline_guard.num_layers
+                    reported_offset,
+                    reported_offset + reported_num
                 );
             } else if is_last {
                 info!("[self] last worker in pipeline, sending Heartbeat back to hub");
                 let pipeline_guard = pipeline.read().await;
+                let (reported_offset, reported_num) = if let (Some(o), Some(n)) = (pipeline_guard.loaded_layer_offset, pipeline_guard.loaded_num_layers) {
+                    (o, n)
+                } else {
+                    (pipeline_guard.layer_offset, pipeline_guard.num_layers)
+                };
                 let hb = WorkerHeartbeat {
                     worker_id: config.worker_id.clone(),
                     load: 0.0,
-                    layer_offset: pipeline_guard.layer_offset,
-                    num_layers: pipeline_guard.num_layers,
+                    layer_offset: reported_offset,
+                    num_layers: reported_num,
                     has_gpu: config.has_gpu,
                     vram_gb: config.vram_gb,
                     active: true,
@@ -272,8 +282,8 @@ async fn handle_hub_message(
                 w.write_all(&data).await.ok();
                 info!(
                     "[-> hub] Heartbeat: layers {}-{}, active=true, last_hop=true",
-                    pipeline_guard.layer_offset,
-                    pipeline_guard.layer_offset + pipeline_guard.num_layers
+                    reported_offset,
+                    reported_offset + reported_num
                 );
             }
 
@@ -323,6 +333,8 @@ async fn handle_hub_message(
                     pipeline_guard.setup_started = false;
                     pipeline_guard.llama_server_started = false;
                     pipeline_guard.rpc_server_started = false;
+                    pipeline_guard.loaded_layer_offset = None;
+                    pipeline_guard.loaded_num_layers = None;
                     
                     // Kill running services so they restart with new layer params
                     let rpc_child = rpc_child.clone();
@@ -620,6 +632,8 @@ async fn handle_hub_message(
                                                                     let mut g = pc.write().await;
                                                                     g.rpc_server_started = true;
                                                                     g.ready_for_inference = true;
+                                                                    g.loaded_layer_offset = Some(layer_offset);
+                                                                    g.loaded_num_layers = Some(num_layers);
                                                                 }
                                                             });
                                                         }
