@@ -322,6 +322,19 @@ async fn handle_hub_message(
                     info!("Layer assignment changed, resetting setup state");
                     pipeline_guard.setup_started = false;
                     pipeline_guard.llama_server_started = false;
+                    pipeline_guard.rpc_server_started = false;
+                    
+                    // Kill running services so they restart with new layer params
+                    let rpc_child = rpc_child.clone();
+                    let llama_child = llama_child.clone();
+                    tokio::spawn(async move {
+                        if let Some(mut c) = rpc_child.lock().await.take() {
+                            c.kill().ok();
+                        }
+                        if let Some(mut c) = llama_child.lock().await.take() {
+                            c.kill().ok();
+                        }
+                    });
                 }
             }
 
