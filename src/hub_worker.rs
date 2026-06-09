@@ -401,13 +401,11 @@ async fn handle_hub_message(
                         let model_name = pipeline_guard.model_name.clone();
                         let has_gpu = config.has_gpu;
                         let llama_port = config.llama_port;
-                        let rpc_port = config.rpc_port;
                         let layer_offset = pipeline_guard.layer_offset;
                         let num_layers = pipeline_guard.num_layers;
                         let pipeline_clone = pipeline.clone();
                         let model_hash_clone = pipeline_guard.model_hash.clone();
                         let llama_child_clone = llama_child.clone();
-                        let rpc_child_clone = rpc_child.clone();
 
                         tokio::spawn(async move {
                             let model_path = data_dir().join("model.gguf");
@@ -627,6 +625,7 @@ async fn handle_hub_message(
                                                     pipeline_guard.ready_for_inference = true;
                                                     drop(pipeline_guard);
 
+                                                    // Spawn rpc-server AFTER model is ready
                                                     let rpc_port = config.rpc_port + 1;
                                                     let rpc_path = rpc::rpc_binary_path();
                                                     if !rpc_path.exists() {
