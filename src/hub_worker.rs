@@ -185,9 +185,39 @@ async fn handle_hub_message(
                     pipeline_guard.is_last = my_worker.is_last;
                     pipeline_guard.layer_offset = my_worker.layer_offset;
                     pipeline_guard.num_layers = my_worker.num_layers;
+                    pipeline_guard.last_hop = my_worker.last_hop.clone();
+                    pipeline_guard.next_hop = my_worker.next_hop.clone();
                 }
                 
-                if my_worker.is_first {
+                let (is_first, is_last, llama_server_started, ready_for_inference) = {
+                    let pipeline_guard = pipeline.read().await;
+                    (pipeline_guard.is_first, pipeline_guard.is_last, pipeline_guard.llama_server_started, pipeline_guard.ready_for_inference)
+                };
+                
+                let is_ready = llama_server_started && ready_for_inference;
+                
+                if !is_ready {
+                    info!("[self] not ready for inference yet (llama_server_started={}, ready={})", 
+                        llama_server_started, ready_for_inference);
+                    if let Some(ref hop) = my_worker.next_hop {
+                        let addr = format!("{}:{}", hop.host, hop.port);
+                        info!("[-> {}] Forwarding HeartbeatForward to next hop at {}", hop.worker_id, addr);
+                        match tokio::net::TcpStream::connect(&addr).await {
+                            Ok(mut forward_stream) => {
+                                let msg = HubMessage::HeartbeatForward { pipeline: pipeline_owned };
+                                let data = encode_msg(&msg);
+                                forward_stream.write_all(&data).await.ok();
+                                info!("[-> {}] HeartbeatForward sent", hop.worker_id);
+                            }
+                            Err(e) => {
+                                warn!("[-> {}] HeartbeatForward FAILED: {}", hop.worker_id, e);
+                            }
+                        }
+                    }
+                    return;
+                }
+                
+                if is_first {
                     info!("[self] first worker in pipeline, sending Heartbeat back to hub");
                     let pipeline_guard = pipeline.read().await;
                     let hb = WorkerHeartbeat {
@@ -210,7 +240,7 @@ async fn handle_hub_message(
                         pipeline_guard.layer_offset,
                         pipeline_guard.layer_offset + pipeline_guard.num_layers
                     );
-                } else if my_worker.is_last {
+                } else if is_last {
                     info!("[self] last worker in pipeline, sending Heartbeat back to hub");
                     let pipeline_guard = pipeline.read().await;
                     let hb = WorkerHeartbeat {
@@ -395,7 +425,9 @@ async fn handle_hub_message(
                                             Ok(llama_cmd) => {
                                                 info!("llama-server started on port {}", llama_port);
                                                 llama_child_clone.lock().await.replace(llama_cmd);
-                                                pipeline_clone.write().await.llama_server_started = true;
+                                                let mut pg = pipeline_clone.write().await;
+                                                pg.llama_server_started = true;
+                                                pg.ready_for_inference = true;
                                                 notify(
                                                     "akai-agent",
                                                     &format!(
@@ -576,6 +608,7 @@ async fn handle_hub_message(
                                                         .await
                                                         .replace(llama_cmd);
                                                     pipeline_guard.llama_server_started = true;
+                                                    pipeline_guard.ready_for_inference = true;
                                                     drop(pipeline_guard);
                                                     notify(
                                                         "akai-agent",

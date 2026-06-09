@@ -179,6 +179,7 @@ pub struct PipelineState {
     pub llama_server_started: bool,
     pub rpc_server_started: bool,
     pub setup_started: bool,
+    pub ready_for_inference: bool,
 }
 
 impl PipelineState {
@@ -201,6 +202,7 @@ impl PipelineState {
             llama_server_started: false,
             rpc_server_started: false,
             setup_started: false,
+            ready_for_inference: false,
         }
     }
 }

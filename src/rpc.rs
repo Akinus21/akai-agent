@@ -488,7 +488,7 @@ pub fn llama_server_port_flag(binary: &Path) -> &'static str {
     "--port"
 }
 
-pub fn spawn_llama_server(binary: &Path, model_path: &str, n_gpu_layers: i32, port: u16, layer_offset: usize, num_layers: usize) -> Result<std::process::Child> {
+pub fn spawn_llama_server(binary: &Path, model_path: &str, n_gpu_layers: i32, port: u16, _layer_offset: usize, _num_layers: usize) -> Result<std::process::Child> {
     let port_flag = llama_server_port_flag(binary);
     let mut cmd = std::process::Command::new(binary);
     cmd.arg("-m").arg(model_path)
@@ -496,13 +496,6 @@ pub fn spawn_llama_server(binary: &Path, model_path: &str, n_gpu_layers: i32, po
        .arg("-ngl").arg(n_gpu_layers.to_string())
        .arg(port_flag).arg(port.to_string())
        .arg("--host").arg("0.0.0.0");
-    
-    if layer_offset > 0 {
-        cmd.arg("--offset-layers").arg(layer_offset.to_string());
-    }
-    if num_layers > 0 {
-        cmd.arg("--n-layers").arg(num_layers.to_string());
-    }
 
     #[cfg(target_os = "linux")]
     {
