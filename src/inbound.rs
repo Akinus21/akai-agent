@@ -112,17 +112,29 @@ async fn handle_inbound_connection(
                 .chunks_exact(4)
                 .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                 .collect();
+            
             let response = HubMessage::InferenceResponse(crate::types::InferenceResponse {
                 id: fwd.id,
                 token: None,
                 hidden_states: Some(hidden_states),
-                is_done: false,
+                is_done: true,
                 text: None,
                 prompt_tokens: 0,
                 completion_tokens: 0,
             });
             let data = crate::protocol::encode_msg(&response);
-            stream.write_all(&data).await?;
+            
+            if let Some(ref hub_addr) = fwd.hub_addr {
+                info!("[-> hub] Sending response directly to hub at {}", hub_addr);
+                if let Ok(mut hub_stream) = tokio::net::TcpStream::connect(hub_addr).await {
+                    hub_stream.write_all(&data).await.ok();
+                    info!("[-> hub] Response sent to hub");
+                } else {
+                    warn!("Failed to connect to hub at {}", hub_addr);
+                }
+            } else {
+                stream.write_all(&data).await.ok();
+            }
         }
         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
             info!("Received HeartbeatForward for worker {}", worker_id);

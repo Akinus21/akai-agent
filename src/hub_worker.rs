@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use crate::config::data_dir;
 use crate::protocol::{encode_msg, file_sha256};
 use crate::types::{
-    HubMessage, HubWorkerConfig, InferenceResponse,
+    HubMessage, HubWorkerConfig, InferenceForward, InferenceResponse,
     PipelineState, WorkerHeartbeat, WorkerInfo,
 };
 use crate::{inbound, rpc};
@@ -357,6 +357,8 @@ async fn handle_hub_message(
                         let model_name = pipeline_guard.model_name.clone();
                         let has_gpu = config.has_gpu;
                         let llama_port = config.llama_port;
+                        let layer_offset = pipeline_guard.layer_offset;
+                        let num_layers = pipeline_guard.num_layers;
                         let pipeline_clone = pipeline.clone();
                         let model_hash_clone = pipeline_guard.model_hash.clone();
                         let llama_child_clone = llama_child.clone();
@@ -387,6 +389,8 @@ async fn handle_hub_message(
                                             &model_path.to_string_lossy(),
                                             ngl,
                                             llama_port,
+                                            layer_offset,
+                                            num_layers,
                                         ) {
                                             Ok(llama_cmd) => {
                                                 info!("llama-server started on port {}", llama_port);
@@ -548,6 +552,8 @@ async fn handle_hub_message(
 
                             if model_path.exists() {
                                 let mut pipeline_guard = pipeline_clone.write().await;
+                                let layer_offset = pipeline_guard.layer_offset;
+                                let num_layers = pipeline_guard.num_layers;
                                 if !pipeline_guard.llama_server_started {
                                     match rpc::ensure_llama_server().await {
                                         Ok(llama_path) => {
@@ -557,6 +563,8 @@ async fn handle_hub_message(
                                                 &model_path.to_string_lossy(),
                                                 ngl,
                                                 llama_port,
+                                                layer_offset,
+                                                num_layers,
                                             ) {
                                                 Ok(llama_cmd) => {
                                                     info!(
@@ -613,16 +621,28 @@ async fn handle_hub_message(
 
         HubMessage::InferenceRequest(req) => {
             info!(
-                "[<- hub] InferenceRequest: id={}, max_tokens={}",
-                req.id, req.max_new_tokens
+                "[<- hub] InferenceRequest: id={}, is_first={}, is_last={}, max_tokens={}",
+                req.id, req.is_first, req.is_last, req.max_new_tokens
             );
+            
+            let pipeline_guard = pipeline.read().await;
+            let is_first = pipeline_guard.is_first;
+            let is_last = pipeline_guard.is_last;
+            let next_hop = pipeline_guard.next_hop.clone();
+            let layer_offset = pipeline_guard.layer_offset;
+            let num_layers = pipeline_guard.num_layers;
+            drop(pipeline_guard);
+
+            info!("[self] is_first={}, is_last={}, layers={}-{}", 
+                is_first, is_last, layer_offset, layer_offset + num_layers);
+
+            let llama_port = config.llama_port;
+            let client = reqwest::Client::new();
+            let llm_url = format!("http://127.0.0.1:{}/v1/chat/completions", llama_port);
+
             let prompt = req.prompt.clone().unwrap_or_default();
             let max_tokens = req.max_new_tokens;
             let temperature = req.temperature;
-            let llama_port = config.llama_port;
-
-            let client = reqwest::Client::new();
-            let llm_url = format!("http://127.0.0.1:{}/v1/chat/completions", llama_port);
 
             let body = serde_json::json!({
                 "model": "local",
@@ -632,7 +652,7 @@ async fn handle_hub_message(
                 "stream": false
             });
 
-            let resp_msg = match client
+            match client
                 .post(&llm_url)
                 .json(&body)
                 .timeout(std::time::Duration::from_secs(120))
@@ -646,37 +666,93 @@ async fn handle_hub_message(
                                 .as_str()
                                 .unwrap_or("")
                                 .to_string();
-                            HubMessage::InferenceResponse(InferenceResponse {
-                                id: req.id.clone(),
-                                token: None,
-                                hidden_states: None,
-                                is_done: true,
-                                text: Some(content),
-                                prompt_tokens: 0,
-                                completion_tokens: 0,
-                            })
+                            
+                            info!("[llama] response text length: {} chars", content.len());
+                            
+                            if is_last {
+                                info!("[self] is last worker, sending response to hub");
+                                let resp_msg = HubMessage::InferenceResponse(InferenceResponse {
+                                    id: req.id.clone(),
+                                    token: None,
+                                    hidden_states: None,
+                                    is_done: true,
+                                    text: Some(content),
+                                    prompt_tokens: 0,
+                                    completion_tokens: 0,
+                                });
+                                let data = encode_msg(&resp_msg);
+                                let mut w = writer.lock().await;
+                                w.write_all(&data).await.ok();
+                            } else if let Some(ref hop) = next_hop {
+                                info!("[-> {}] Forwarding to next worker at {}:{}", hop.worker_id, hop.host, hop.port);
+                                let fwd = HubMessage::InferenceForward(InferenceForward {
+                                    id: req.id.clone(),
+                                    from_worker: config.worker_id.clone(),
+                                    to_worker: hop.worker_id.clone(),
+                                    data: content.into_bytes(),
+                                    hub_addr: Some(config.hub_addr.clone()),
+                                });
+                                let data = encode_msg(&fwd);
+                                match tokio::net::TcpStream::connect(format!("{}:{}", hop.host, hop.port)).await {
+                                    Ok(mut forward_stream) => {
+                                        forward_stream.write_all(&data).await.ok();
+                                        info!("[-> {}] Forwarded to next worker", hop.worker_id);
+                                    }
+                                    Err(e) => {
+                                        error!("[-> {}] Forward failed: {}", hop.worker_id, e);
+                                        let resp_msg = HubMessage::Error {
+                                            code: "FORWARD_ERROR".to_string(),
+                                            message: format!("Failed to forward to {}: {}", hop.worker_id, e),
+                                        };
+                                        let data = encode_msg(&resp_msg);
+                                        let mut w = writer.lock().await;
+                                        w.write_all(&data).await.ok();
+                                    }
+                                }
+                            } else {
+                                info!("[self] no next_hop configured, sending response to hub");
+                                let resp_msg = HubMessage::InferenceResponse(InferenceResponse {
+                                    id: req.id.clone(),
+                                    token: None,
+                                    hidden_states: None,
+                                    is_done: true,
+                                    text: Some(content),
+                                    prompt_tokens: 0,
+                                    completion_tokens: 0,
+                                });
+                                let data = encode_msg(&resp_msg);
+                                let mut w = writer.lock().await;
+                                w.write_all(&data).await.ok();
+                            }
                         } else {
-                            HubMessage::Error {
+                            let resp_msg = HubMessage::Error {
                                 code: "JSON_ERROR".to_string(),
                                 message: "Failed to parse LLM response".to_string(),
-                            }
+                            };
+                            let data = encode_msg(&resp_msg);
+                            let mut w = writer.lock().await;
+                            w.write_all(&data).await.ok();
                         }
                     } else {
-                        HubMessage::Error {
+                        let resp_msg = HubMessage::Error {
                             code: "HTTP_ERROR".to_string(),
                             message: format!("LLM request failed: {}", resp.status()),
-                        }
+                        };
+                        let data = encode_msg(&resp_msg);
+                        let mut w = writer.lock().await;
+                        w.write_all(&data).await.ok();
                     }
                 }
-                Err(e) => HubMessage::Error {
-                    code: "REQUEST_ERROR".to_string(),
-                    message: e.to_string(),
-                },
-            };
-
-            let data = encode_msg(&resp_msg);
-            let mut w = writer.lock().await;
-            w.write_all(&data).await.ok();
+                Err(e) => {
+                    let resp_msg = HubMessage::Error {
+                        code: "REQUEST_ERROR".to_string(),
+                        message: e.to_string(),
+                    };
+                    let data = encode_msg(&resp_msg);
+                    let mut w = writer.lock().await;
+                    w.write_all(&data).await.ok();
+                }
+            }
         }
 
         HubMessage::InferenceForward(fwd) => {
