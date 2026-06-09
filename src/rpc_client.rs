@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use rmp_serde::{Deserializer, Serializer};
+use rmp_serde::Serializer;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -60,7 +60,7 @@ impl RpcClient {
         };
         
         let mut buf = Vec::new();
-        req.serialize(&mut buf).unwrap();
+        req.serialize(&mut buf).map_err(|e| anyhow::anyhow!("serialization error: {}", e))?;
         buf.push(b'\n');
         
         stream.write_all(&buf).await?;
@@ -72,29 +72,30 @@ impl RpcClient {
             bail!("Connection closed during init");
         }
         
-        let mut de = Deserializer::new(&response_buf[..n]);
-        match Deserialize::deserialize(&mut de) {
-            Ok(RpcResponse::Done { .. }) => {
+        let resp: RpcResponse = rmp_serde::from_slice(&response_buf[..n])
+            .map_err(|e| anyhow::anyhow!("deserialization error: {}", e))?;
+        
+        match resp {
+            RpcResponse::Done { .. } => {
                 info!("rpc-server initialized successfully");
                 Ok(())
             }
-            Ok(RpcResponse::Error { message }) => {
+            RpcResponse::Error { message } => {
                 bail!("rpc-server init error: {}", message);
             }
-            Err(e) => {
-                bail!("Failed to parse init response: {}", e);
+            _ => {
+                bail!("Unexpected response type during init");
             }
         }
     }
 
     pub async fn forward(&self, tokens: Vec<i64>, hidden_states: Option<Vec<f32>>) -> Result<(Vec<i64>, Vec<f32>)> {
         let mut stream = TcpStream::connect(&self.addr).await?;
-        stream.set_read_timeout(Some(Duration::from_secs(120)))?;
         
         let req = RpcRequest::Forward { tokens, hidden_states };
         
         let mut buf = Vec::new();
-        req.serialize(&mut buf).unwrap();
+        req.serialize(&mut buf).map_err(|e| anyhow::anyhow!("serialization error: {}", e))?;
         buf.push(b'\n');
         
         stream.write_all(&buf).await?;
@@ -106,26 +107,24 @@ impl RpcClient {
             bail!("Connection closed during forward");
         }
         
-        let mut de = Deserializer::new(&response_buf[..n]);
-        match Deserialize::deserialize(&mut de) {
-            Ok(RpcResponse::HiddenStates { tokens, hidden_states }) => {
+        let resp: RpcResponse = rmp_serde::from_slice(&response_buf[..n])
+            .map_err(|e| anyhow::anyhow!("deserialization error: {}", e))?;
+        
+        match resp {
+            RpcResponse::HiddenStates { tokens, hidden_states } => {
                 Ok((tokens, hidden_states))
             }
-            Ok(RpcResponse::Error { message }) => {
+            RpcResponse::Error { message } => {
                 bail!("rpc-server forward error: {}", message);
             }
-            Ok(RpcResponse::Done { tokens, text: _ }) => {
-                bail!("Unexpected Done response during forward");
-            }
-            Err(e) => {
-                bail!("Failed to parse forward response: {}", e);
+            _ => {
+                bail!("Unexpected response type during forward");
             }
         }
     }
 
     pub async fn generate(&self, tokens: Vec<i64>, max_new_tokens: usize, temperature: f32) -> Result<(Vec<i64>, String)> {
         let mut stream = TcpStream::connect(&self.addr).await?;
-        stream.set_read_timeout(Some(Duration::from_secs(120)))?;
         
         let req = RpcRequest::Generate {
             tokens,
@@ -134,7 +133,7 @@ impl RpcClient {
         };
         
         let mut buf = Vec::new();
-        req.serialize(&mut buf).unwrap();
+        req.serialize(&mut buf).map_err(|e| anyhow::anyhow!("serialization error: {}", e))?;
         buf.push(b'\n');
         
         stream.write_all(&buf).await?;
@@ -146,19 +145,18 @@ impl RpcClient {
             bail!("Connection closed during generate");
         }
         
-        let mut de = Deserializer::new(&response_buf[..n]);
-        match Deserialize::deserialize(&mut de) {
-            Ok(RpcResponse::Done { tokens, text }) => {
+        let resp: RpcResponse = rmp_serde::from_slice(&response_buf[..n])
+            .map_err(|e| anyhow::anyhow!("deserialization error: {}", e))?;
+        
+        match resp {
+            RpcResponse::Done { tokens, text } => {
                 Ok((tokens, text))
             }
-            Ok(RpcResponse::Error { message }) => {
+            RpcResponse::Error { message } => {
                 bail!("rpc-server generate error: {}", message);
             }
-            Ok(RpcResponse::HiddenStates { .. }) => {
-                bail!("Unexpected HiddenStates response during generate");
-            }
-            Err(e) => {
-                bail!("Failed to parse generate response: {}", e);
+            _ => {
+                bail!("Unexpected response type during generate");
             }
         }
     }
