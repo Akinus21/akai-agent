@@ -179,13 +179,17 @@ async fn handle_hub_message(
             let pipeline_owned = pipeline_info.clone();
             let my_id = config.worker_id.clone();
             
-            let (is_first, is_last, last_hop, next_hop, layer_offset, num_layers) = {
+            let (last_hop, next_hop, layer_offset, num_layers) = {
                 let worker = pipeline_owned.workers.iter().find(|w| w.worker_id == my_id);
                 match worker {
-                    Some(w) => (w.is_first, w.is_last, w.last_hop.clone(), w.next_hop.clone(), w.layer_offset, w.num_layers),
+                    Some(w) => (w.last_hop.clone(), w.next_hop.clone(), w.layer_offset, w.num_layers),
                     None => return,
                 }
             };
+            
+            // Derive position from hops - more robust than trusting hub's booleans
+            let is_first = last_hop.is_none();
+            let is_last = next_hop.is_none();
             
             {
                 let mut pipeline_guard = pipeline.write().await;
