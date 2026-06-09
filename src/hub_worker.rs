@@ -699,81 +699,43 @@ async fn handle_hub_message(
             let max_tokens = req.max_new_tokens;
             let temperature = req.temperature;
 
-            if is_last {
-                info!("[self] last worker, running full generate");
-                match client.generate(vec![], max_tokens, temperature).await {
-                    Ok((tokens, text)) => {
-                        info!("[rpc] generate done, text length: {} chars, tokens: {}", text.len(), tokens.len());
-                        let resp_msg = HubMessage::InferenceResponse(InferenceResponse {
-                            id: req.id.clone(),
-                            token: None,
-                            hidden_states: None,
-                            is_done: true,
-                            text: Some(text),
-                            prompt_tokens: 0,
-                            completion_tokens: tokens.len() as u64,
-                        });
-                        let data = encode_msg(&resp_msg);
-                        let mut w = writer.lock().await;
-                        w.write_all(&data).await.ok();
-                    }
-                    Err(e) => {
-                        error!("[rpc] generate failed: {}", e);
-                        let resp_msg = HubMessage::Error {
-                            code: "RPC_ERROR".to_string(),
-                            message: e.to_string(),
-                        };
-                        let data = encode_msg(&resp_msg);
-                        let mut w = writer.lock().await;
-                        w.write_all(&data).await.ok();
-                    }
-                }
-            } else if is_first {
-                info!("[self] first worker, running forward pass to get hidden states");
+            // Unified logic: process layers, then forward or generate
+            if let Some(ref hop) = next_hop {
+                // Has next hop - run forward and forward to next worker
+                info!("[self] has next_hop, running forward pass");
                 match client.forward(vec![], None).await {
                     Ok((tokens, hidden_states)) => {
-                        info!("[rpc] forward done, hidden_states len: {}, tokens: {}", hidden_states.len(), tokens.len());
+                        info!("[rpc] forward done, hidden_states len: {}", hidden_states.len());
                         
                         let hidden_bytes: Vec<u8> = hidden_states.iter()
                             .flat_map(|f| f.to_le_bytes())
                             .collect();
                         
-                        if let Some(ref hop) = next_hop {
-                            info!("[-> {}] Forwarding hidden states ({} bytes) to next worker at {}:{}", 
-                                hop.worker_id, hidden_bytes.len(), hop.host, hop.port);
-                            let fwd = HubMessage::InferenceForward(InferenceForward {
-                                id: req.id.clone(),
-                                from_worker: config.worker_id.clone(),
-                                to_worker: hop.worker_id.clone(),
-                                data: hidden_bytes,
-                                hub_addr: Some(config.hub_addr.clone()),
-                            });
-                            let data = encode_msg(&fwd);
-                            match tokio::net::TcpStream::connect(format!("{}:{}", hop.host, hop.port)).await {
-                                Ok(mut forward_stream) => {
-                                    forward_stream.write_all(&data).await.ok();
-                                    info!("[-> {}] Forwarded to next worker", hop.worker_id);
-                                }
-                                Err(e) => {
-                                    error!("[-> {}] Forward failed: {}", hop.worker_id, e);
-                                    let resp_msg = HubMessage::Error {
-                                        code: "FORWARD_ERROR".to_string(),
-                                        message: format!("Failed to forward to {}: {}", hop.worker_id, e),
-                                    };
-                                    let data = encode_msg(&resp_msg);
-                                    let mut w = writer.lock().await;
-                                    w.write_all(&data).await.ok();
-                                }
+                        info!("[-> {}] Forwarding hidden states ({} bytes) to next worker at {}:{}", 
+                            hop.worker_id, hidden_bytes.len(), hop.host, hop.port);
+                        let fwd = HubMessage::InferenceForward(InferenceForward {
+                            id: req.id.clone(),
+                            from_worker: config.worker_id.clone(),
+                            to_worker: hop.worker_id.clone(),
+                            data: hidden_bytes,
+                            hub_addr: Some(config.hub_addr.clone()),
+                        });
+                        let data = encode_msg(&fwd);
+                        match tokio::net::TcpStream::connect(format!("{}:{}", hop.host, hop.port)).await {
+                            Ok(mut forward_stream) => {
+                                forward_stream.write_all(&data).await.ok();
+                                info!("[-> {}] Forwarded to next worker", hop.worker_id);
                             }
-                        } else {
-                            error!("[self] no next_hop configured but not last worker!");
-                            let resp_msg = HubMessage::Error {
-                                code: "NO_NEXT_HOP".to_string(),
-                                message: "Missing next_hop for non-last worker".to_string(),
-                            };
-                            let data = encode_msg(&resp_msg);
-                            let mut w = writer.lock().await;
-                            w.write_all(&data).await.ok();
+                            Err(e) => {
+                                error!("[-> {}] Forward failed: {}", hop.worker_id, e);
+                                let resp_msg = HubMessage::Error {
+                                    code: "FORWARD_ERROR".to_string(),
+                                    message: format!("Failed to forward to {}: {}", hop.worker_id, e),
+                                };
+                                let data = encode_msg(&resp_msg);
+                                let mut w = writer.lock().await;
+                                w.write_all(&data).await.ok();
+                            }
                         }
                     }
                     Err(e) => {
@@ -788,14 +750,51 @@ async fn handle_hub_message(
                     }
                 }
             } else {
-                info!("[self] middle worker, expecting hidden states from previous worker");
-                let resp_msg = HubMessage::Error {
-                    code: "NOT_IMPLEMENTED".to_string(),
-                    message: "Middle worker handling not yet implemented".to_string(),
-                };
-                let data = encode_msg(&resp_msg);
-                let mut w = writer.lock().await;
-                w.write_all(&data).await.ok();
+                // No next hop - last worker, run forward then generate and return to hub
+                info!("[self] last worker, running forward pass then generate");
+                match client.forward(vec![], None).await {
+                    Ok((tokens, hidden_states)) => {
+                        info!("[rpc] forward done, hidden_states len: {}", hidden_states.len());
+                        
+                        match client.generate(tokens, max_tokens, temperature).await {
+                            Ok((tokens, text)) => {
+                                info!("[rpc] generate done, text length: {} chars", text.len());
+                                let resp_msg = HubMessage::InferenceResponse(InferenceResponse {
+                                    id: req.id.clone(),
+                                    token: None,
+                                    hidden_states: None,
+                                    is_done: true,
+                                    text: Some(text),
+                                    prompt_tokens: 0,
+                                    completion_tokens: tokens.len() as u64,
+                                });
+                                let data = encode_msg(&resp_msg);
+                                let mut w = writer.lock().await;
+                                w.write_all(&data).await.ok();
+                            }
+                            Err(e) => {
+                                error!("[rpc] generate failed: {}", e);
+                                let resp_msg = HubMessage::Error {
+                                    code: "RPC_ERROR".to_string(),
+                                    message: e.to_string(),
+                                };
+                                let data = encode_msg(&resp_msg);
+                                let mut w = writer.lock().await;
+                                w.write_all(&data).await.ok();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("[rpc] forward failed: {}", e);
+                        let resp_msg = HubMessage::Error {
+                            code: "RPC_ERROR".to_string(),
+                            message: e.to_string(),
+                        };
+                        let data = encode_msg(&resp_msg);
+                        let mut w = writer.lock().await;
+                        w.write_all(&data).await.ok();
+                    }
+                }
             }
         }
 
