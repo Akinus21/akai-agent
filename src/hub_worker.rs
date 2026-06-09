@@ -132,11 +132,11 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
 
                                         handle_hub_message(
                                             &msg,
-                                            &config,
-                                            &pipeline,
-                                            &writer,
-                                            &rpc_child,
-                                            &llama_child,
+                                            config.clone(),
+                                            pipeline.clone(),
+                                            writer.clone(),
+                                            rpc_child.clone(),
+                                            llama_child.clone(),
                                         )
                                         .await;
                                     }
@@ -161,11 +161,11 @@ pub async fn run_hub_worker(config: HubWorkerConfig) -> Result<()> {
 
 async fn handle_hub_message(
     msg: &HubMessage,
-    config: &HubWorkerConfig,
-    pipeline: &Arc<RwLock<PipelineState>>,
-    writer: &Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
-    rpc_child: &Arc<Mutex<Option<std::process::Child>>>,
-    llama_child: &Arc<Mutex<Option<std::process::Child>>>,
+    config: HubWorkerConfig,
+    pipeline: Arc<RwLock<PipelineState>>,
+    writer: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    rpc_child: Arc<Mutex<Option<std::process::Child>>>,
+    llama_child: Arc<Mutex<Option<std::process::Child>>>,
 ) {
     match msg {
         HubMessage::HeartbeatForward { pipeline: pipeline_info } => {
