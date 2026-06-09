@@ -177,47 +177,55 @@ async fn handle_hub_message(
             );
 
             let pipeline_owned = pipeline_info.clone();
-            let my_id = &config.worker_id;
-            if let Some(my_worker) = pipeline_owned.workers.iter().find(|w| &w.worker_id == my_id) {
-                {
-                    let mut pipeline_guard = pipeline.write().await;
-                    pipeline_guard.is_first = my_worker.is_first;
-                    pipeline_guard.is_last = my_worker.is_last;
-                    pipeline_guard.layer_offset = my_worker.layer_offset;
-                    pipeline_guard.num_layers = my_worker.num_layers;
-                    pipeline_guard.last_hop = my_worker.last_hop.clone();
-                    pipeline_guard.next_hop = my_worker.next_hop.clone();
+            let my_id = config.worker_id.clone();
+            
+            let (is_first, is_last, last_hop, next_hop, layer_offset, num_layers) = {
+                let worker = pipeline_owned.workers.iter().find(|w| w.worker_id == my_id);
+                match worker {
+                    Some(w) => (w.is_first, w.is_last, w.last_hop.clone(), w.next_hop.clone(), w.layer_offset, w.num_layers),
+                    None => return,
                 }
-                
-                let (is_first, is_last, llama_server_started, ready_for_inference) = {
-                    let pipeline_guard = pipeline.read().await;
-                    (pipeline_guard.is_first, pipeline_guard.is_last, pipeline_guard.llama_server_started, pipeline_guard.ready_for_inference)
-                };
-                
-                let is_ready = llama_server_started && ready_for_inference;
-                
-                if !is_ready {
-                    info!("[self] not ready for inference yet (llama_server_started={}, ready={})", 
-                        llama_server_started, ready_for_inference);
-                    if let Some(ref hop) = my_worker.next_hop {
-                        let addr = format!("{}:{}", hop.host, hop.port);
-                        info!("[-> {}] Forwarding HeartbeatForward to next hop at {}", hop.worker_id, addr);
-                        match tokio::net::TcpStream::connect(&addr).await {
-                            Ok(mut forward_stream) => {
-                                let msg = HubMessage::HeartbeatForward { pipeline: pipeline_owned };
-                                let data = encode_msg(&msg);
-                                forward_stream.write_all(&data).await.ok();
-                                info!("[-> {}] HeartbeatForward sent", hop.worker_id);
-                            }
-                            Err(e) => {
-                                warn!("[-> {}] HeartbeatForward FAILED: {}", hop.worker_id, e);
-                            }
+            };
+            
+            {
+                let mut pipeline_guard = pipeline.write().await;
+                pipeline_guard.is_first = is_first;
+                pipeline_guard.is_last = is_last;
+                pipeline_guard.layer_offset = layer_offset;
+                pipeline_guard.num_layers = num_layers;
+                pipeline_guard.last_hop = last_hop.clone();
+                pipeline_guard.next_hop = next_hop.clone();
+            }
+            
+            let (llama_server_started, ready_for_inference) = {
+                let pipeline_guard = pipeline.read().await;
+                (pipeline_guard.llama_server_started, pipeline_guard.ready_for_inference)
+            };
+            
+            let is_ready = llama_server_started && ready_for_inference;
+            
+            if !is_ready {
+                info!("[self] not ready for inference yet (llama_server_started={}, ready={})", 
+                    llama_server_started, ready_for_inference);
+                if let Some(ref hop) = next_hop {
+                    let addr = format!("{}:{}", hop.host, hop.port);
+                    info!("[-> {}] Forwarding HeartbeatForward to next hop at {}", hop.worker_id, addr);
+                    match tokio::net::TcpStream::connect(&addr).await {
+                        Ok(mut forward_stream) => {
+                            let msg = HubMessage::HeartbeatForward { pipeline: pipeline_owned };
+                            let data = encode_msg(&msg);
+                            forward_stream.write_all(&data).await.ok();
+                            info!("[-> {}] HeartbeatForward sent", hop.worker_id);
+                        }
+                        Err(e) => {
+                            warn!("[-> {}] HeartbeatForward FAILED: {}", hop.worker_id, e);
                         }
                     }
-                    return;
                 }
-                
-                if is_first {
+                return;
+            }
+            
+            if is_first {
                     info!("[self] first worker in pipeline, sending Heartbeat back to hub");
                     let pipeline_guard = pipeline.read().await;
                     let hb = WorkerHeartbeat {
@@ -228,7 +236,7 @@ async fn handle_hub_message(
                         has_gpu: config.has_gpu,
                         vram_gb: config.vram_gb,
                         active: true,
-                        last_hop_connected: my_worker.last_hop.is_some(),
+                        last_hop_connected: last_hop.is_some(),
                         next_hop_connected: true,
                     };
                     let msg = HubMessage::Heartbeat(hb);
@@ -265,7 +273,7 @@ async fn handle_hub_message(
                     );
                 }
 
-                if let Some(ref hop) = my_worker.next_hop {
+                if let Some(ref hop) = next_hop {
                     let hop_worker_id = hop.worker_id.clone();
                     let hop_host = hop.host.clone();
                     let hop_port = hop.port;
