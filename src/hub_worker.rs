@@ -273,27 +273,26 @@ async fn handle_hub_message(
                 );
             }
 
-                if let Some(ref hop) = next_hop {
-                    let hop_worker_id = hop.worker_id.clone();
-                    let hop_host = hop.host.clone();
-                    let hop_port = hop.port;
-                    let addr = format!("{}:{}", hop_host, hop_port);
-                    info!(
-                        "[-> {}] Forwarding HeartbeatForward to next hop at {}",
-                        hop_worker_id, addr
-                    );
-                    match tokio::net::TcpStream::connect(&addr).await {
-                        Ok(mut forward_stream) => {
-                            let msg = HubMessage::HeartbeatForward {
-                                pipeline: pipeline_owned,
-                            };
-                            let data = encode_msg(&msg);
-                                forward_stream.write_all(&data).await.ok();
-                                info!("[-> {}] HeartbeatForward sent", hop_worker_id);
-                        }
-                        Err(e) => {
-                            warn!("[-> {}] HeartbeatForward FAILED: {}", hop_worker_id, e);
-                        }
+            if let Some(ref hop) = next_hop {
+                let hop_worker_id = hop.worker_id.clone();
+                let hop_host = hop.host.clone();
+                let hop_port = hop.port;
+                let addr = format!("{}:{}", hop_host, hop_port);
+                info!(
+                    "[-> {}] Forwarding HeartbeatForward to next hop at {}",
+                    hop_worker_id, addr
+                );
+                match tokio::net::TcpStream::connect(&addr).await {
+                    Ok(mut forward_stream) => {
+                        let msg = HubMessage::HeartbeatForward {
+                            pipeline: pipeline_owned,
+                        };
+                        let data = encode_msg(&msg);
+                        forward_stream.write_all(&data).await.ok();
+                        info!("[-> {}] HeartbeatForward sent", hop_worker_id);
+                    }
+                    Err(e) => {
+                        warn!("[-> {}] HeartbeatForward FAILED: {}", hop_worker_id, e);
                     }
                 }
             }
