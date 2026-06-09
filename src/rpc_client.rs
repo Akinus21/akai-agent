@@ -1,7 +1,6 @@
 use anyhow::{bail, Result};
 use rmp_serde::Serializer;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info, warn};
@@ -50,6 +49,14 @@ impl RpcClient {
         }
     }
 
+    fn serialize_req(req: &RpcRequest) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        let mut serializer = Serializer::new(&mut buf);
+        req.serialize(&mut serializer).map_err(|e| anyhow::anyhow!("{}", e))?;
+        buf.push(b'\n');
+        Ok(buf)
+    }
+
     pub async fn init(&self, model_path: &str, layer_offset: usize, num_layers: usize) -> Result<()> {
         let mut stream = TcpStream::connect(&self.addr).await?;
         
@@ -59,11 +66,8 @@ impl RpcClient {
             num_layers,
         };
         
-        let mut buf = Vec::new();
-        req.serialize(&mut buf).map_err(|e| anyhow::anyhow!("serialization error: {}", e))?;
-        buf.push(b'\n');
-        
-        stream.write_all(&buf).await?;
+        let data = Self::serialize_req(&req)?;
+        stream.write_all(&data).await?;
         
         let mut response_buf = vec![0u8; 65536];
         let n = stream.read(&mut response_buf).await?;
@@ -93,12 +97,8 @@ impl RpcClient {
         let mut stream = TcpStream::connect(&self.addr).await?;
         
         let req = RpcRequest::Forward { tokens, hidden_states };
-        
-        let mut buf = Vec::new();
-        req.serialize(&mut buf).map_err(|e| anyhow::anyhow!("serialization error: {}", e))?;
-        buf.push(b'\n');
-        
-        stream.write_all(&buf).await?;
+        let data = Self::serialize_req(&req)?;
+        stream.write_all(&data).await?;
         
         let mut response_buf = vec![0u8; 65536];
         let n = stream.read(&mut response_buf).await?;
@@ -131,12 +131,8 @@ impl RpcClient {
             max_new_tokens,
             temperature,
         };
-        
-        let mut buf = Vec::new();
-        req.serialize(&mut buf).map_err(|e| anyhow::anyhow!("serialization error: {}", e))?;
-        buf.push(b'\n');
-        
-        stream.write_all(&buf).await?;
+        let data = Self::serialize_req(&req)?;
+        stream.write_all(&data).await?;
         
         let mut response_buf = vec![0u8; 65536];
         let n = stream.read(&mut response_buf).await?;
