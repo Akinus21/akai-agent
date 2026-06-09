@@ -226,52 +226,52 @@ async fn handle_hub_message(
             }
             
             if is_first {
-                    info!("[self] first worker in pipeline, sending Heartbeat back to hub");
-                    let pipeline_guard = pipeline.read().await;
-                    let hb = WorkerHeartbeat {
-                        worker_id: config.worker_id.clone(),
-                        load: 0.0,
-                        layer_offset: pipeline_guard.layer_offset,
-                        num_layers: pipeline_guard.num_layers,
-                        has_gpu: config.has_gpu,
-                        vram_gb: config.vram_gb,
-                        active: true,
-                        last_hop_connected: last_hop.is_some(),
-                        next_hop_connected: true,
-                    };
-                    let msg = HubMessage::Heartbeat(hb);
-                    let data = encode_msg(&msg);
-                    let mut w = writer.lock().await;
-                    w.write_all(&data).await.ok();
-                    info!(
-                        "[-> hub] Heartbeat: layers {}-{}, active=true",
-                        pipeline_guard.layer_offset,
-                        pipeline_guard.layer_offset + pipeline_guard.num_layers
-                    );
-                } else if is_last {
-                    info!("[self] last worker in pipeline, sending Heartbeat back to hub");
-                    let pipeline_guard = pipeline.read().await;
-                    let hb = WorkerHeartbeat {
-                        worker_id: config.worker_id.clone(),
-                        load: 0.0,
-                        layer_offset: pipeline_guard.layer_offset,
-                        num_layers: pipeline_guard.num_layers,
-                        has_gpu: config.has_gpu,
-                        vram_gb: config.vram_gb,
-                        active: true,
-                        last_hop_connected: true,
-                        next_hop_connected: false,
-                    };
-                    let msg = HubMessage::Heartbeat(hb);
-                    let data = encode_msg(&msg);
-                    let mut w = writer.lock().await;
-                    w.write_all(&data).await.ok();
-                    info!(
-                        "[-> hub] Heartbeat: layers {}-{}, active=true, last_hop=true",
-                        pipeline_guard.layer_offset,
-                        pipeline_guard.layer_offset + pipeline_guard.num_layers
-                    );
-                }
+                info!("[self] first worker in pipeline, sending Heartbeat back to hub");
+                let pipeline_guard = pipeline.read().await;
+                let hb = WorkerHeartbeat {
+                    worker_id: config.worker_id.clone(),
+                    load: 0.0,
+                    layer_offset: pipeline_guard.layer_offset,
+                    num_layers: pipeline_guard.num_layers,
+                    has_gpu: config.has_gpu,
+                    vram_gb: config.vram_gb,
+                    active: true,
+                    last_hop_connected: last_hop.is_some(),
+                    next_hop_connected: true,
+                };
+                let msg = HubMessage::Heartbeat(hb);
+                let data = encode_msg(&msg);
+                let mut w = writer.lock().await;
+                w.write_all(&data).await.ok();
+                info!(
+                    "[-> hub] Heartbeat: layers {}-{}, active=true",
+                    pipeline_guard.layer_offset,
+                    pipeline_guard.layer_offset + pipeline_guard.num_layers
+                );
+            } else if is_last {
+                info!("[self] last worker in pipeline, sending Heartbeat back to hub");
+                let pipeline_guard = pipeline.read().await;
+                let hb = WorkerHeartbeat {
+                    worker_id: config.worker_id.clone(),
+                    load: 0.0,
+                    layer_offset: pipeline_guard.layer_offset,
+                    num_layers: pipeline_guard.num_layers,
+                    has_gpu: config.has_gpu,
+                    vram_gb: config.vram_gb,
+                    active: true,
+                    last_hop_connected: true,
+                    next_hop_connected: false,
+                };
+                let msg = HubMessage::Heartbeat(hb);
+                let data = encode_msg(&msg);
+                let mut w = writer.lock().await;
+                w.write_all(&data).await.ok();
+                info!(
+                    "[-> hub] Heartbeat: layers {}-{}, active=true, last_hop=true",
+                    pipeline_guard.layer_offset,
+                    pipeline_guard.layer_offset + pipeline_guard.num_layers
+                );
+            }
 
                 if let Some(ref hop) = next_hop {
                     let hop_worker_id = hop.worker_id.clone();
