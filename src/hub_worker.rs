@@ -352,45 +352,8 @@ async fn handle_hub_message(
                 }
 
                 if pipeline_guard.num_layers > 0 {
-                    if !pipeline_guard.rpc_server_started {
-                        info!(
-                            "Spawning rpc-server for layers {} to {}...",
-                            pipeline_guard.layer_offset,
-                            pipeline_guard.layer_offset + pipeline_guard.num_layers
-                        );
-
-                        let rpc_path = rpc::rpc_binary_path();
-                        if !rpc_path.exists() {
-                            info!("Downloading rpc-server...");
-                            if let Err(e) = rpc::ensure_rpc_server().await {
-                                error!("Failed to download rpc-server: {}", e);
-                                notify("akai-agent", "Failed to download rpc-server");
-                            }
-                        }
-
-                        let layer_offset = pipeline_guard.layer_offset;
-                        let num_layers = pipeline_guard.num_layers;
-                        
-                        match rpc::spawn_rpc_server(&rpc_path, config.rpc_port + 1, layer_offset, num_layers) {
-                            Ok(child) => {
-                                rpc_child.lock().await.replace(child);
-                                info!("rpc-server started on port {}", config.rpc_port + 1);
-                                pipeline_guard.rpc_server_started = true;
-                                notify(
-                                    "akai-agent",
-                                    &format!(
-                                        "rpc-server ready (layers {}-{})",
-                                        pipeline_guard.layer_offset,
-                                        pipeline_guard.layer_offset + pipeline_guard.num_layers
-                                    ),
-                                );
-                            }
-                            Err(e) => {
-                                error!("Failed to spawn rpc-server: {}", e);
-                                notify("akai-agent", "Failed to start rpc-server");
-                            }
-                        }
-                    }
+                    // Skip early rpc-server spawn - we spawn it AFTER model download
+                    pipeline_guard.rpc_server_started = true;
 
                     if pipeline_guard.num_layers > 0
                         && !pipeline_guard.model_url.is_empty()
