@@ -378,7 +378,6 @@ async fn handle_hub_message(
 
                 if pipeline_guard.num_layers > 0 {
                     // Skip early rpc-server spawn - we spawn it AFTER model download
-                    pipeline_guard.rpc_server_started = true;
 
                     if pipeline_guard.num_layers > 0
                         && !pipeline_guard.model_url.is_empty()
