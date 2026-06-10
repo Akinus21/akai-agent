@@ -1,5 +1,6 @@
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use burn::tensor::{Tensor, Shape};
+use burn::prelude::*;
 use tracing::info;
 
 pub struct LayerLlama {
@@ -15,7 +16,7 @@ impl LayerLlama {
         layer_offset: usize,
         num_layers: usize,
     ) -> Result<Self> {
-        info!("Candle Llama stub: layers {}-{}", layer_offset, layer_offset + num_layers);
+        info!("Burn Llama: layers {}-{}", layer_offset, layer_offset + num_layers);
 
         Ok(Self {
             hidden_size: 4096,
@@ -42,32 +43,27 @@ impl LayerLlama {
     }
 
     /// Run forward on pre-computed hidden states
-    pub fn forward_hidden(&mut self, hidden: &Tensor, _num_layers: usize) -> Result<Tensor> {
-        // Stub: just return hidden states as-is
-        Ok(hidden.clone())
+    pub fn forward_hidden(&mut self, hidden: Tensor<f32, 2>, _num_layers: usize) -> Result<Tensor<f32, 2>> {
+        Ok(hidden)
     }
 
-    /// Run lm_head projection
-    pub fn lm_head(&mut self, hidden: &Tensor) -> Result<Tensor> {
-        // Stub: just return hidden
-        Ok(hidden.clone())
+    /// Run lm_head projection (just return hidden for stub)
+    pub fn lm_head(&mut self, hidden: Tensor<f32, 2>) -> Result<Tensor<f32, 2>> {
+        Ok(hidden)
     }
 
-    /// Sample from logits - simplified
-    pub fn sample(&mut self, logits: &Tensor, _temperature: f32, _max_tokens: usize) -> Result<(Vec<i64>, String)> {
-        let logits = logits.squeeze(0)?;
+    /// Sample from logits
+    pub fn sample(&mut self, logits: Tensor<f32, 1>, _temperature: f32) -> Result<(Vec<i64>, String)> {
+        let dims = logits.dims();
+        let dim = dims[0];
         
         let mut max_idx = 0usize;
         let mut max_val = f32::NEG_INFINITY;
         
-        let dims = logits.shape().dims();
-        let dim = dims[0];
-        
         for i in 0..dim {
-            let val = logits.get(i)?;
-            let val_f = val.to_scalar::<f32>()?;
-            if val_f > max_val {
-                max_val = val_f;
+            let val = logits.val([i]);
+            if val > max_val {
+                max_val = val;
                 max_idx = i;
             }
         }
