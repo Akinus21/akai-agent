@@ -5,22 +5,22 @@ pub struct LayerLlama {
     hidden_size: usize,
     vocab_size: usize,
     layer_offset: usize,
-    num_layers: usize,
+    num_assigned_layers: usize,
 }
 
 impl LayerLlama {
     pub fn load_with_layers(
-        _model_path: &str,
+        model_path: &str,
         layer_offset: usize,
         num_layers: usize,
     ) -> Result<Self> {
-        info!("GGUS LayerLlama: layers {}-{}", layer_offset, layer_offset + num_layers);
+        info!("GGUS LayerLlama stub: path={}, layers {}-{}", model_path, layer_offset, layer_offset + num_layers);
 
         Ok(Self {
             hidden_size: 4096,
             vocab_size: 32000,
             layer_offset,
-            num_layers,
+            num_assigned_layers: num_layers,
         })
     }
 
@@ -29,7 +29,7 @@ impl LayerLlama {
     }
 
     pub fn num_layers(&self) -> usize {
-        self.num_layers
+        self.num_assigned_layers
     }
 
     pub fn hidden_size(&self) -> usize {
@@ -52,10 +52,15 @@ impl LayerLlama {
 
     /// Sample from logits - simple argmax
     pub fn sample(&mut self, logits: &[f32], _temperature: f32) -> Result<(Vec<i64>, String)> {
+        let vocab_size = self.vocab_size;
+        
+        // Argmax over vocab_size (last vocab_size elements are logits for our single token)
+        let offset = logits.len() - vocab_size;
         let mut max_idx = 0usize;
         let mut max_val = f32::NEG_INFINITY;
         
-        for (i, &val) in logits.iter().enumerate() {
+        for i in 0..vocab_size {
+            let val = logits[offset + i];
             if val > max_val {
                 max_val = val;
                 max_idx = i;
