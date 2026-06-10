@@ -38,7 +38,7 @@ impl LayerLlama {
         let data = fs::read(model_path)?;
         let mut reader = GGufReader::new(&data);
         
-        let header = reader.read_header()?;
+        let header = reader.read_header().map_err(|e| anyhow::anyhow!("GGufReadError: {:?}", e))?;
         info!("GGUF version: {}, tensors: {}, metadata: {}", 
             header.version, header.tensor_count, header.metadata_kv_count);
         
@@ -95,7 +95,7 @@ impl LayerLlama {
             let meta = reader.read_tensor_meta().map_err(|e| anyhow::anyhow!("GGufReadError: {:?}", e))?;
             let name = meta.name().to_string();
             let info = meta.to_info();
-            let n_elements: usize = info.shape().iter().product();
+            let n_elements: usize = info.shape().iter().copied().product();
             tensor_info.insert(name, (info.offset(), info.nbytes(), n_elements, info.ty()));
         }
         
