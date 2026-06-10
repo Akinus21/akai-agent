@@ -45,9 +45,9 @@ impl LayerLlama {
         // Read all metadata into a map
         let mut metadata = HashMap::new();
         for _ in 0..header.metadata_kv_count {
-            let kv = reader.read_meta_kv()?;
-            let key = kv.key.to_string();
-            metadata.insert(key, kv.value);
+            let kv = reader.read_meta_kv().map_err(|e| anyhow::anyhow!("GGufReadError: {:?}", e))?;
+            let key = kv.key().to_string();
+            metadata.insert(key, kv.value().clone());
         }
         
         // Extract config from metadata
@@ -172,9 +172,9 @@ impl LayerLlama {
     }
 }
 
-fn get_u32(metadata: &HashMap<String, GGufMetaKV>, key: &str) -> Option<u32> {
-    metadata.get(key).and_then(|kv| {
-        match &kv.value {
+fn get_u32(metadata: &HashMap<String, GGufMetaDataValueType>, key: &str) -> Option<u32> {
+    metadata.get(key).and_then(|v| {
+        match v {
             GGufMetaDataValueType::Uint32(v) => Some(*v),
             GGufMetaDataValueType::Int32(v) => Some(*v as u32),
             _ => None,
@@ -182,9 +182,9 @@ fn get_u32(metadata: &HashMap<String, GGufMetaKV>, key: &str) -> Option<u32> {
     })
 }
 
-fn get_f32(metadata: &HashMap<String, GGufMetaKV>, key: &str) -> Option<f32> {
-    metadata.get(key).and_then(|kv| {
-        match &kv.value {
+fn get_f32(metadata: &HashMap<String, GGufMetaDataValueType>, key: &str) -> Option<f32> {
+    metadata.get(key).and_then(|v| {
+        match v {
             GGufMetaDataValueType::Float32(v) => Some(*v),
             _ => None,
         }
