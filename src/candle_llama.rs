@@ -1,42 +1,27 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use candle_transformers::models::llama::{Config, Llama};
 use tracing::info;
 
 pub struct LayerLlama {
-    model: Llama,
-    layer_offset: usize,
-    num_layers: usize,
     hidden_size: usize,
     vocab_size: usize,
+    layer_offset: usize,
+    num_layers: usize,
 }
 
 impl LayerLlama {
     pub fn load_with_layers(
-        model_path: &str,
+        _model_path: &str,
         layer_offset: usize,
         num_layers: usize,
     ) -> Result<Self> {
-        info!("Loading Candle Llama: path={}, layer_offset={}, num_layers={}",
-            model_path, layer_offset, num_layers);
-
-        let device = Device::Cpu;
-
-        // Load GGUF file using candle's loader
-        let vb = candle_nn::VarBuilder::from_gguf(model_path, DType::F32, device)?;
-        let config = vb.get_config()?;
-        
-        info!("Model config: hidden_size={}, num_layers={}", config.hidden_size, config.n_layer);
-
-        // Build the Llama model
-        let model = Llama::load(vb, &config)?;
+        info!("Candle Llama stub: layers {}-{}", layer_offset, layer_offset + num_layers);
 
         Ok(Self {
-            model,
+            hidden_size: 4096,
+            vocab_size: 32000,
             layer_offset,
             num_layers,
-            hidden_size: config.hidden_size,
-            vocab_size: config.vocab_size,
         })
     }
 
@@ -56,28 +41,20 @@ impl LayerLlama {
         self.vocab_size
     }
 
-    /// Run forward through assigned layers
-    pub fn forward_layers(&mut self, x: Tensor, start_layer: usize, num_layers: usize) -> Result<Tensor> {
-        // Use the model's forward method
-        let logits = self.model.forward(&x, 0)?;
-        Ok(logits)
-    }
-
-    /// Run forward on pre-computed hidden states (no embedding step)
+    /// Run forward on pre-computed hidden states
     pub fn forward_hidden(&mut self, hidden: &Tensor, _num_layers: usize) -> Result<Tensor> {
-        // For now, just return the hidden states as-is since we can't access internal layers
+        // Stub: just return hidden states as-is
         Ok(hidden.clone())
     }
 
     /// Run lm_head projection
     pub fn lm_head(&mut self, hidden: &Tensor) -> Result<Tensor> {
-        // Can't access lm_head directly, return hidden
+        // Stub: just return hidden
         Ok(hidden.clone())
     }
 
     /// Sample from logits - simplified
     pub fn sample(&mut self, logits: &Tensor, _temperature: f32, _max_tokens: usize) -> Result<(Vec<i64>, String)> {
-        // Simple argmax sampling
         let logits = logits.squeeze(0)?;
         
         let mut max_idx = 0usize;
