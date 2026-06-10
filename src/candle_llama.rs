@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use ggus::{GGufReader, GGufMetaKV, GGmlType, GGufMetaDataValueType};
+use ggus::{GGufReader, GGmlType, GGufMetaDataValueType};
 use std::fs;
 use std::collections::HashMap;
 use tracing::info;
@@ -52,31 +52,33 @@ impl LayerLlama {
         for _ in 0..header.metadata_kv_count {
             let kv = reader.read_meta_kv().map_err(|e| anyhow::anyhow!("GGufReadError: {:?}", e))?;
             let key = kv.key().to_string();
+            let ty = kv.ty();
+            let value_bytes = kv.value_bytes();
             
             match key.as_str() {
-                "llama.embedding_length" => {
-                    if let GGufMetaDataValueType::Uint32(v) = kv.value() {
-                        hidden_size = *v as usize;
+                "llama.embedding_length" if ty == GGufMetaDataValueType::Uint32 => {
+                    if value_bytes.len() >= 4 {
+                        hidden_size = u32::from_le_bytes([value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3]]) as usize;
                     }
                 }
-                "llama.vocab_size" => {
-                    if let GGufMetaDataValueType::Uint32(v) = kv.value() {
-                        vocab_size = *v as usize;
+                "llama.vocab_size" if ty == GGufMetaDataValueType::Uint32 => {
+                    if value_bytes.len() >= 4 {
+                        vocab_size = u32::from_le_bytes([value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3]]) as usize;
                     }
                 }
-                "llama.block_count" => {
-                    if let GGufMetaDataValueType::Uint32(v) = kv.value() {
-                        total_layers = *v as usize;
+                "llama.block_count" if ty == GGufMetaDataValueType::Uint32 => {
+                    if value_bytes.len() >= 4 {
+                        total_layers = u32::from_le_bytes([value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3]]) as usize;
                     }
                 }
-                "llama.rope.dimension_count" => {
-                    if let GGufMetaDataValueType::Uint32(v) = kv.value() {
-                        rope_dim = *v as usize;
+                "llama.rope.dimension_count" if ty == GGufMetaDataValueType::Uint32 => {
+                    if value_bytes.len() >= 4 {
+                        rope_dim = u32::from_le_bytes([value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3]]) as usize;
                     }
                 }
-                "llama.rope.freq_base" => {
-                    if let GGufMetaDataValueType::Float32(v) = kv.value() {
-                        rope_freq_base = *v;
+                "llama.rope.freq_base" if ty == GGufMetaDataValueType::Float32 => {
+                    if value_bytes.len() >= 4 {
+                        rope_freq_base = f32::from_le_bytes([value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3]]);
                     }
                 }
                 _ => {}
@@ -91,9 +93,9 @@ impl LayerLlama {
         let mut tensor_info = HashMap::new();
         for _ in 0..header.tensor_count {
             let meta = reader.read_tensor_meta().map_err(|e| anyhow::anyhow!("GGufReadError: {:?}", e))?;
-            let name = meta.name.to_string();
-            let n_elements: usize = meta.shape.iter().product();
-            tensor_info.insert(name, (meta.tensor_data_offset, meta.nbytes, n_elements, meta.ty));
+            let name = meta.name().to_string();
+            let n_elements: usize = meta.shape().iter().product();
+            tensor_info.insert(name, (meta.offset(), meta.nbytes(), n_elements, meta.ty()));
         }
         
         let mut layers = Vec::new();
