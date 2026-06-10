@@ -94,8 +94,9 @@ impl LayerLlama {
         for _ in 0..header.tensor_count {
             let meta = reader.read_tensor_meta().map_err(|e| anyhow::anyhow!("GGufReadError: {:?}", e))?;
             let name = meta.name().to_string();
-            let n_elements: usize = meta.shape().iter().product();
-            tensor_info.insert(name, (meta.offset(), meta.nbytes(), n_elements, meta.ty()));
+            let info = meta.to_info();
+            let n_elements: usize = info.shape().iter().product();
+            tensor_info.insert(name, (info.offset(), info.nbytes(), n_elements, info.ty()));
         }
         
         let mut layers = Vec::new();
