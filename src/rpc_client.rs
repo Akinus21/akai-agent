@@ -3,7 +3,7 @@ use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::info;
 
-const RPC_CONN_CAPS_SIZE: usize = 64;
+const RPC_CONN_CAPS_SIZE: usize = 24;
 const RPC_CMD_HELLO: u8 = 14;
 
 pub struct RpcClient {
