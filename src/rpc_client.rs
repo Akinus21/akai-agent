@@ -5,6 +5,15 @@ use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info, warn};
 
+fn serialize_hello() -> Vec<u8> {
+    use rmp_serde::Serializer;
+    use serde::Serialize;
+    let mut buf = Vec::new();
+    let map = std::collections::HashMap::from([("hello", true)]);
+    map.serialize(&mut Serializer::new(&mut buf)).unwrap();
+    buf
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RpcRequest {
     Init {
@@ -60,6 +69,10 @@ impl RpcClient {
     pub async fn init(&self, model_path: &str, layer_offset: usize, num_layers: usize) -> Result<()> {
         let mut stream = TcpStream::connect(&self.addr).await?;
         
+        let hello = serialize_hello();
+        stream.write_all(&hello).await?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        
         let req = RpcRequest::Init {
             model_path: model_path.to_string(),
             layer_offset,
@@ -96,6 +109,10 @@ impl RpcClient {
     pub async fn forward(&self, tokens: Vec<i64>, hidden_states: Option<Vec<f32>>) -> Result<(Vec<i64>, Vec<f32>)> {
         let mut stream = TcpStream::connect(&self.addr).await?;
         
+        let hello = serialize_hello();
+        stream.write_all(&hello).await?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        
         let req = RpcRequest::Forward { tokens, hidden_states };
         let data = Self::serialize_req(&req)?;
         stream.write_all(&data).await?;
@@ -125,6 +142,10 @@ impl RpcClient {
 
     pub async fn generate(&self, tokens: Vec<i64>, max_new_tokens: usize, temperature: f32) -> Result<(Vec<i64>, String)> {
         let mut stream = TcpStream::connect(&self.addr).await?;
+        
+        let hello = serialize_hello();
+        stream.write_all(&hello).await?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         
         let req = RpcRequest::Generate {
             tokens,
