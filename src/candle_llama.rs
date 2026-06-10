@@ -1,32 +1,20 @@
 use anyhow::{bail, Result};
-use ggus::GGufReader;
-use std::fs::File;
-use std::io::{BufReader, Read, Seek};
+use ggus::{GGuf, GGufTensorInfo};
+use std::fs;
 use tracing::info;
 
-pub struct TensorData {
-    pub data: Vec<f32>,
-    pub shape: Vec<usize>,
-}
-
 pub struct LayerLlama {
-    // Model tensors
     tok_embeddings: Vec<f32>,
     layers: Vec<LayerWeights>,
     ln_f_weight: Vec<f32>,
     lm_head_weight: Vec<f32>,
-    
-    // Config
     hidden_size: usize,
     vocab_size: usize,
     num_layers: usize,
     layer_offset: usize,
     num_assigned_layers: usize,
-    
-    // RoPE
     cos_cached: Vec<f32>,
     sin_cached: Vec<f32>,
-    rope_dim: usize,
 }
 
 struct LayerWeights {
@@ -42,44 +30,37 @@ struct LayerWeights {
 }
 
 impl LayerLlama {
-    pub fn load_with_layers(
-        model_path: &str,
-        layer_offset: usize,
-        num_layers: usize,
-    ) -> Result<Self> {
+    pub fn load_with_layers(model_path: &str, layer_offset: usize, num_layers: usize) -> Result<Self> {
         info!("Loading GGUF model: path={}, layers {}-{}", model_path, layer_offset, layer_offset + num_layers);
 
-        let file = File::open(model_path)?;
-        let mut reader = BufReader::new(file);
+        let data = fs::read(model_path)?;
+        let gguf = GGuf::new(&data)?;
         
-        let gguf = GGufReader::read(reader)?;
-        let metadata = gguf.metadata();
-        
-        let hidden_size: usize = metadata.get_i32("hidden_size").unwrap_or(4096) as usize;
-        let vocab_size: usize = metadata.get_i32("vocab_size").unwrap_or(32000) as usize;
-        let total_layers: usize = metadata.get_i32("num_layers").unwrap_or(32) as usize;
-        let rope_dim: usize = metadata.get_i32("rope_dim").unwrap_or(128) as usize;
-        let rope_freq_base: f32 = metadata.get_f32("rope_freq_base").unwrap_or(10000.0);
+        let hidden_size = gguf.get_usize("llm.hidden_size").unwrap_or(4096);
+        let vocab_size = gguf.get_usize("llm.vocab_size").unwrap_or(32000);
+        let total_layers = gguf.get_usize("llm.block_count").unwrap_or(32);
+        let rope_dim = gguf.get_usize("llm.rope.head_dim").unwrap_or(128);
+        let rope_freq_base = gguf.get_f32("llm.rope.freq_base").unwrap_or(10000.0);
         
         info!("Model config: hidden={}, vocab={}, layers={}, rope_dim={}", hidden_size, vocab_size, total_layers, rope_dim);
 
         let (cos_cached, sin_cached) = compute_rope_cache(rope_dim, rope_freq_base, 32768);
         
-        let mut layers: Vec<LayerWeights> = Vec::new();
+        let mut layers = Vec::new();
         let start_layer = layer_offset;
         let end_layer = layer_offset + num_layers;
         
         for layer_idx in start_layer..end_layer {
             info!("Loading layer {} (global {})", layers.len(), layer_idx);
-            let layer = load_layer_weights(&mut reader, &gguf, layer_idx)?;
+            let layer = load_layer_weights(&gguf, layer_idx)?;
             layers.push(layer);
         }
         
-        let tok_embeddings = load_tensor_f32(&mut reader, &gguf, "tok_embeddings.weight")?
+        let tok_embeddings = load_tensor_f32(&gguf, "tok_embeddings.weight")?
             .ok_or_else(|| anyhow::anyhow!("missing tok_embeddings"))?;
-        let ln_f_weight = load_tensor_f32(&mut reader, &gguf, "ln_f.weight")?
+        let ln_f_weight = load_tensor_f32(&gguf, "ln_f.weight")?
             .ok_or_else(|| anyhow::anyhow!("missing ln_f"))?;
-        let lm_head_weight = load_tensor_f32(&mut reader, &gguf, "lm_head.weight")?
+        let lm_head_weight = load_tensor_f32(&gguf, "lm_head.weight")?
             .ok_or_else(|| anyhow::anyhow!("missing lm_head"))?;
         
         info!("Model loaded: {} layers assigned", layers.len());
@@ -96,7 +77,6 @@ impl LayerLlama {
             num_assigned_layers: num_layers,
             cos_cached,
             sin_cached,
-            rope_dim,
         })
     }
 
@@ -105,7 +85,6 @@ impl LayerLlama {
     pub fn hidden_size(&self) -> usize { self.hidden_size }
     pub fn vocab_size(&self) -> usize { self.vocab_size }
 
-    /// Forward through assigned layers
     pub fn forward_layers(&mut self, input: &[f32], num_tokens: usize) -> Result<Vec<f32>> {
         let mut hidden = input.to_vec();
         for layer_idx in 0..self.layers.len() {
@@ -125,13 +104,11 @@ impl LayerLlama {
         let v = matmul(&input_renorm, &layer.attn_v_weight, num_tokens, hs, hs)?;
         
         let (q_rope, k_rope) = apply_rope(&q, &k, num_tokens, &self.cos_cached, &self.sin_cached)?;
-        
         let attn_scores = softmax_scores(&q_rope, &k_rope, num_tokens, hs)?;
         let attn_output = matmul(&attn_scores, &v, num_tokens, num_tokens, hs)?;
         let attn_result = matmul(&attn_output, &layer.attn_output_weight, num_tokens, num_tokens, hs)?;
         
         let x1 = add(input, &attn_result, num_tokens, hs)?;
-        
         let x1_norm = rms_norm(&x1, &layer.ffn_norm_weight, 1e-5);
         
         let gate = matmul(&x1_norm, &layer.ffn_gate_weight, num_tokens, hs, hs)?;
@@ -141,22 +118,17 @@ impl LayerLlama {
         let ffn_intermediate = hadamard(&silu_gate, &up, num_tokens, hs)?;
         
         let down = matmul(&ffn_intermediate, &layer.ffn_down_weight, num_tokens, hs, hs)?;
-        
         let output = add(&x1, &down, num_tokens, hs)?;
         Ok(output)
     }
 
-    /// Final projection
     pub fn project(&mut self, hidden: &[f32], num_tokens: usize) -> Result<Vec<f32>> {
         let hidden_norm = rms_norm(hidden, &self.ln_f_weight, 1e-5);
         let logits = matmul_t(&hidden_norm, &self.lm_head_weight, num_tokens, self.vocab_size)?;
         Ok(logits)
     }
 
-    /// Sample from logits
     pub fn sample(&mut self, logits: &[f32], temperature: f32) -> Result<(Vec<i64>, String)> {
-        let vocab_size = self.vocab_size;
-        
         let scaled: Vec<f32> = if temperature > 0.0 && (temperature - 1.0).abs() > 0.001 {
             let scale = 1.0 / temperature;
             logits.iter().map(|&v| v * scale).collect()
@@ -165,57 +137,61 @@ impl LayerLlama {
         };
         
         let probs = softmax(&scaled)?;
-        
         let mut max_idx = 0usize;
         let mut max_val = f32::NEG_INFINITY;
         for (i, &p) in probs.iter().enumerate() {
-            if p > max_val {
-                max_val = p;
-                max_idx = i;
-            }
+            if p > max_val { max_val = p; max_idx = i; }
         }
         
-        let token = max_idx as i64;
-        let text = format!("token_{}", token);
-        Ok((vec![token], text))
+        Ok((vec![max_idx as i64], format!("token_{}", max_idx)))
     }
 }
 
-fn load_tensor_f32<R: Read + Seek>(reader: &mut R, gguf: &GGufReader, name: &str) -> Result<Option<Vec<f32>>> {
-    if let Some(info) = gguf.tensor_info(name) {
+fn load_tensor_f32(gguf: &GGuf, name: &str) -> Result<Option<Vec<f32>>> {
+    let tensors = gguf.tensors();
+    let key = name.to_string();
+    if let Some(meta) = tensors.get(&key) {
+        let info = meta.to_info();
+        let offset = info.offset();
+        let nbytes = info.nbytes();
         let shape = info.shape();
         let n_elements: usize = shape.iter().product();
-        let mut data = vec![0f32; n_elements];
-        reader.read_exact(&mut data)?;
-        Ok(Some(data))
+        
+        let data = &gguf.data()[offset..offset + nbytes];
+        let mut float_data = vec![0f32; n_elements];
+        
+        // Handle quantization - for now assume f32
+        if info.ty() == ggus::GGmlType::F32 {
+            let bytes = data;
+            for i in 0..n_elements {
+                float_data[i] = f32::from_le_bytes([bytes[i*4], bytes[i*4+1], bytes[i*4+2], bytes[i*4+3]]);
+            }
+        }
+        
+        Ok(Some(float_data))
     } else {
         Ok(None)
     }
 }
 
-fn load_layer_weights<R: Read + Seek>(reader: &mut R, gguf: &GGufReader, layer_idx: usize) -> Result<LayerWeights> {
+fn load_layer_weights(gguf: &GGuf, layer_idx: usize) -> Result<LayerWeights> {
     let p = format!("blk.{}", layer_idx);
     
-    let attn_q = load_tensor_f32(reader, gguf, &format!("{}.attn_q.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing attn_q"))?;
-    let attn_k = load_tensor_f32(reader, gguf, &format!("{}.attn_k.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing attn_k"))?;
-    let attn_v = load_tensor_f32(reader, gguf, &format!("{}.attn_v.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing attn_v"))?;
-    let attn_output = load_tensor_f32(reader, gguf, &format!("{}.attn_output.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing attn_output"))?;
-    let attn_norm = load_tensor_f32(reader, gguf, &format!("{}.attn_norm.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing attn_norm"))?;
-    let ffn_gate = load_tensor_f32(reader, gguf, &format!("{}.ffn_gate.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing ffn_gate"))?;
-    let ffn_down = load_tensor_f32(reader, gguf, &format!("{}.ffn_down.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing ffn_down"))?;
-    let ffn_up = load_tensor_f32(reader, gguf, &format!("{}.ffn_up.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing ffn_up"))?;
-    let ffn_norm = load_tensor_f32(reader, gguf, &format!("{}.ffn_norm.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing ffn_norm"))?;
+    let attn_q = load_tensor_f32(gguf, &format!("{}.attn_q.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing attn_q"))?;
+    let attn_k = load_tensor_f32(gguf, &format!("{}.attn_k.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing attn_k"))?;
+    let attn_v = load_tensor_f32(gguf, &format!("{}.attn_v.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing attn_v"))?;
+    let attn_output = load_tensor_f32(gguf, &format!("{}.attn_output.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing attn_output"))?;
+    let attn_norm = load_tensor_f32(gguf, &format!("{}.attn_norm.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing attn_norm"))?;
+    let ffn_gate = load_tensor_f32(gguf, &format!("{}.ffn_gate.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing ffn_gate"))?;
+    let ffn_down = load_tensor_f32(gguf, &format!("{}.ffn_down.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing ffn_down"))?;
+    let ffn_up = load_tensor_f32(gguf, &format!("{}.ffn_up.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing ffn_up"))?;
+    let ffn_norm = load_tensor_f32(gguf, &format!("{}.ffn_norm.weight", p))?.ok_or_else(|| anyhow::anyhow!("missing ffn_norm"))?;
     
     Ok(LayerWeights {
-        attn_q_weight: attn_q,
-        attn_k_weight: attn_k,
-        attn_v_weight: attn_v,
-        attn_output_weight: attn_output,
-        attn_norm_weight: attn_norm,
-        ffn_gate_weight: ffn_gate,
-        ffn_down_weight: ffn_down,
-        ffn_up_weight: ffn_up,
-        ffn_norm_weight: ffn_norm,
+        attn_q_weight: attn_q, attn_k_weight: attn_k, attn_v_weight: attn_v,
+        attn_output_weight: attn_output, attn_norm_weight: attn_norm,
+        ffn_gate_weight: ffn_gate, ffn_down_weight: ffn_down,
+        ffn_up_weight: ffn_up, ffn_norm_weight: ffn_norm,
     })
 }
 
@@ -224,9 +200,7 @@ fn matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Result<Vec<f32>
     for i in 0..m {
         for j in 0..n {
             let mut sum = 0.0f32;
-            for l in 0..k {
-                sum += a[i * k + l] * b[l * n + j];
-            }
+            for l in 0..k { sum += a[i * k + l] * b[l * n + j]; }
             result[i * n + j] = sum;
         }
     }
@@ -239,9 +213,7 @@ fn matmul_t(a: &[f32], b: &[f32], m: usize, n: usize) -> Result<Vec<f32>> {
     for i in 0..m {
         for j in 0..n {
             let mut sum = 0.0f32;
-            for l in 0..k {
-                sum += a[i * k + l] * b[j * k + l];
-            }
+            for l in 0..k { sum += a[i * k + l] * b[j * k + l]; }
             result[i * n + j] = sum;
         }
     }
@@ -251,17 +223,13 @@ fn matmul_t(a: &[f32], b: &[f32], m: usize, n: usize) -> Result<Vec<f32>> {
 fn softmax_scores(q: &[f32], k: &[f32], num_tokens: usize, hs: usize) -> Result<Vec<f32>> {
     let mut scores = vec![0.0f32; num_tokens * num_tokens];
     let scale = 1.0 / (hs as f32).sqrt();
-    
     for i in 0..num_tokens {
         for j in 0..num_tokens {
             let mut sum = 0.0f32;
-            for l in 0..hs {
-                sum += q[i * hs + l] * k[j * hs + l];
-            }
+            for l in 0..hs { sum += q[i * hs + l] * k[j * hs + l]; }
             scores[i * num_tokens + j] = sum * scale;
         }
     }
-    
     for i in 0..num_tokens {
         let offset = i * num_tokens;
         let row = &scores[offset..offset + num_tokens];
@@ -271,11 +239,8 @@ fn softmax_scores(q: &[f32], k: &[f32], num_tokens: usize, hs: usize) -> Result<
             scores[offset + j] = (scores[offset + j] - max_val).exp();
             exp_sum += scores[offset + j];
         }
-        for j in 0..num_tokens {
-            scores[offset + j] /= exp_sum;
-        }
+        for j in 0..num_tokens { scores[offset + j] /= exp_sum; }
     }
-    
     Ok(scores)
 }
 
@@ -291,7 +256,7 @@ fn softmax(input: &[f32]) -> Result<Vec<f32>> {
     let n = input.len();
     let max_val = input.iter().fold(f32::NEG_INFINITY, |m, &x| m.max(x));
     let mut exp_sum = 0.0f32;
-    let mut exps: Vec<f32> = Vec::with_capacity(n);
+    let mut exps = Vec::with_capacity(n);
     for &x in input {
         let e = (x - max_val).exp();
         exps.push(e);
