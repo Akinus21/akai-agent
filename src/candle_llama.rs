@@ -56,27 +56,27 @@ impl LayerLlama {
             let value_bytes = kv.value_bytes();
             
             match key.as_str() {
-                "llama.embedding_length" if ty == GGufMetaDataValueType::Uint32 => {
+                "llama.embedding_length" if ty == GGufMetaDataValueType::U32 => {
                     if value_bytes.len() >= 4 {
                         hidden_size = u32::from_le_bytes([value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3]]) as usize;
                     }
                 }
-                "llama.vocab_size" if ty == GGufMetaDataValueType::Uint32 => {
+                "llama.vocab_size" if ty == GGufMetaDataValueType::U32 => {
                     if value_bytes.len() >= 4 {
                         vocab_size = u32::from_le_bytes([value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3]]) as usize;
                     }
                 }
-                "llama.block_count" if ty == GGufMetaDataValueType::Uint32 => {
+                "llama.block_count" if ty == GGufMetaDataValueType::U32 => {
                     if value_bytes.len() >= 4 {
                         total_layers = u32::from_le_bytes([value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3]]) as usize;
                     }
                 }
-                "llama.rope.dimension_count" if ty == GGufMetaDataValueType::Uint32 => {
+                "llama.rope.dimension_count" if ty == GGufMetaDataValueType::U32 => {
                     if value_bytes.len() >= 4 {
                         rope_dim = u32::from_le_bytes([value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3]]) as usize;
                     }
                 }
-                "llama.rope.freq_base" if ty == GGufMetaDataValueType::Float32 => {
+                "llama.rope.freq_base" if ty == GGufMetaDataValueType::F32 => {
                     if value_bytes.len() >= 4 {
                         rope_freq_base = f32::from_le_bytes([value_bytes[0], value_bytes[1], value_bytes[2], value_bytes[3]]);
                     }
