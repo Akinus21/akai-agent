@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use candle::{DType, Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::quantized_llama::{Config, Llama, ModelWeights};
 use std::path::Path;
@@ -100,13 +100,13 @@ impl LayerLlama {
         let logits = if temperature > 0.0 && temperature != 1.0 {
             let scale = 1.0 / temperature;
             let scale_tensor = Tensor::new(scale, &Device::Cpu)?;
-            candle::Tensor::mul(&logits, &scale_tensor)?
+            candle_core::Tensor::mul(&logits, &scale_tensor)?
         } else {
             logits
         };
 
         // Softmax for probabilities
-        let probs = candle::Tensor::softmax(&logits, 0)?;
+        let probs = candle_core::Tensor::softmax(&logits, 0)?;
 
         // Argmax - find the token with highest probability
         let mut max_idx = 0usize;
