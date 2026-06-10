@@ -64,7 +64,7 @@ impl LayerLlama {
         let mut max_val = f32::NEG_INFINITY;
         
         for i in 0..dim {
-            let val = logits.val([i]);
+            let val = logits.get([i]).to_scalar().unwrap();
             if val > max_val {
                 max_val = val;
                 max_idx = i;

@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use burn::tensor::{Tensor, Shape};
 use burn::backend::NdArray;
+use burn::device::BackendDevice;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -65,7 +66,8 @@ impl CandleServer {
         let num_tokens = hidden_states.len() / hidden_size;
 
         // Create burn tensor with ndarray backend
-        let data: Tensor<Backend, 2> = Tensor::from_floats(hidden_states)
+        let device = BackendDevice::default();
+        let data: Tensor<Backend, 2> = Tensor::from_floats(hidden_states, &device)
             .reshape([num_tokens, hidden_size]);
 
         let output = model.forward_hidden(data, model.num_layers())?;
@@ -82,7 +84,8 @@ impl CandleServer {
         let hidden_size = model.hidden_size();
         let num_tokens = hidden_states.len() / hidden_size;
 
-        let data: Tensor<Backend, 2> = Tensor::from_floats(hidden_states)
+        let device = BackendDevice::default();
+        let data: Tensor<Backend, 2> = Tensor::from_floats(hidden_states, &device)
             .reshape([num_tokens, hidden_size]);
 
         let output = model.forward_hidden(data, model.num_layers())?;
