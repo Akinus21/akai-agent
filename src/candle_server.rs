@@ -1,7 +1,4 @@
 use anyhow::{bail, Result};
-use burn::tensor::{Tensor, Shape};
-use burn::backend::NdArray;
-use burn::device::BackendDevice;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -9,8 +6,6 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
 use crate::candle_llama::LayerLlama;
-
-type Backend = NdArray;
 
 const CMD_HELLO: u8 = 14;
 const CMD_INIT: u8 = 1;
@@ -44,7 +39,7 @@ impl CandleServer {
     }
 
     pub async fn init_model(&self, model_path: &str) -> Result<()> {
-        info!("Initializing Burn model: {} (layers {}-{})",
+        info!("Initializing GGUS model: {} (layers {}-{})",
             model_path, self.layer_offset, self.layer_offset + self.num_layers);
 
         let llama = LayerLlama::load_with_layers(model_path, self.layer_offset, self.num_layers)?;
@@ -53,7 +48,7 @@ impl CandleServer {
         *model = Some(llama);
 
         self.set_ready(true).await;
-        info!("Burn model initialized successfully");
+        info!("GGUS model initialized successfully");
 
         Ok(())
     }
@@ -62,37 +57,19 @@ impl CandleServer {
         let mut model_guard = self.model.lock().await;
         let model = model_guard.as_mut().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
 
-        let hidden_size = model.hidden_size();
-        let num_tokens = hidden_states.len() / hidden_size;
-
-        // Create burn tensor with ndarray backend
-        let device = BackendDevice::default();
-        let data: Tensor<Backend, 2> = Tensor::from_floats(hidden_states, &device)
-            .reshape([num_tokens, hidden_size]);
-
-        let output = model.forward_hidden(data, model.num_layers())?;
-
-        // Convert back to Vec<f32>
-        let data = output.to_data().to_vec::<f32>().unwrap_or_default();
-        Ok(data)
+        let output = model.forward_hidden(hidden_states)?;
+        Ok(output)
     }
 
     pub async fn generate(&self, hidden_states: &[f32], max_tokens: usize, temperature: f32) -> Result<(Vec<i64>, String)> {
         let mut model_guard = self.model.lock().await;
         let model = model_guard.as_mut().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
 
-        let hidden_size = model.hidden_size();
-        let num_tokens = hidden_states.len() / hidden_size;
-
-        let device = BackendDevice::default();
-        let data: Tensor<Backend, 2> = Tensor::from_floats(hidden_states, &device)
-            .reshape([num_tokens, hidden_size]);
-
-        let output = model.forward_hidden(data, model.num_layers())?;
-        let logits = model.lm_head(output)?;
-
-        let logits = logits.reshape([logits.dims()[1]]);
-        let (tokens, text) = model.sample(logits, temperature)?;
+        // Apply lm_head first (stub - just passes through)
+        let after_lm = model.lm_head(hidden_states)?;
+        
+        // Then sample
+        let (tokens, text) = model.sample(&after_lm, temperature)?;
 
         Ok((tokens, text))
     }
@@ -117,7 +94,7 @@ async fn write_message(stream: &mut TcpStream, data: &[u8]) -> Result<()> {
 
 async fn handle_hello(stream: &mut TcpStream) -> Result<()> {
     info!("HELLO received");
-    let response = vec![0, 21, 0]; // major=0, minor=21 (burn 0.21)
+    let response = vec![0, 0, 1]; // major=0, minor=0, patch=1 (stub version)
     write_message(stream, &response).await?;
     Ok(())
 }
@@ -228,7 +205,7 @@ async fn handle_client(mut stream: TcpStream, server: Arc<CandleServer>) {
 pub async fn run_server(port: u16, layer_offset: usize, num_layers: usize) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
-    info!("Burn server listening on {}", addr);
+    info!("GGUS server listening on {}", addr);
 
     let server = Arc::new(CandleServer::new(layer_offset, num_layers));
 

@@ -23,7 +23,7 @@ impl CandleWorker {
         server.init_model(&model_path).await?;
 
         // Spawn the server task
-        let server_clone = server;
+        let _server = server;
         let join_handle = tokio::spawn(async move {
             if let Err(e) = run_server(port, layer_offset, num_layers).await {
                 error!("Candle server error: {}", e);

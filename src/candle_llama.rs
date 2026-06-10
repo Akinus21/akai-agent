@@ -1,10 +1,5 @@
 use anyhow::Result;
-use burn::tensor::{Tensor, Shape};
-use burn::prelude::*;
-use burn::backend::NdArray;
 use tracing::info;
-
-type Backend = NdArray;
 
 pub struct LayerLlama {
     hidden_size: usize,
@@ -19,7 +14,7 @@ impl LayerLlama {
         layer_offset: usize,
         num_layers: usize,
     ) -> Result<Self> {
-        info!("Burn Llama: layers {}-{}", layer_offset, layer_offset + num_layers);
+        info!("GGUS LayerLlama: layers {}-{}", layer_offset, layer_offset + num_layers);
 
         Ok(Self {
             hidden_size: 4096,
@@ -45,26 +40,22 @@ impl LayerLlama {
         self.vocab_size
     }
 
-    /// Run forward on pre-computed hidden states
-    pub fn forward_hidden(&mut self, hidden: Tensor<Backend, 2>, _num_layers: usize) -> Result<Tensor<Backend, 2>> {
-        Ok(hidden)
+    /// Run forward on pre-computed hidden states (stub - just passes through)
+    pub fn forward_hidden(&mut self, hidden: &[f32]) -> Result<Vec<f32>> {
+        Ok(hidden.to_vec())
     }
 
-    /// Run lm_head projection (just return hidden for stub)
-    pub fn lm_head(&mut self, hidden: Tensor<Backend, 2>) -> Result<Tensor<Backend, 2>> {
-        Ok(hidden)
+    /// Run lm_head projection (stub - just passes through)
+    pub fn lm_head(&mut self, hidden: &[f32]) -> Result<Vec<f32>> {
+        Ok(hidden.to_vec())
     }
 
-    /// Sample from logits
-    pub fn sample(&mut self, logits: Tensor<Backend, 1>, _temperature: f32) -> Result<(Vec<i64>, String)> {
-        let dims = logits.dims();
-        let dim = dims[0];
-        
+    /// Sample from logits - simple argmax
+    pub fn sample(&mut self, logits: &[f32], _temperature: f32) -> Result<(Vec<i64>, String)> {
         let mut max_idx = 0usize;
         let mut max_val = f32::NEG_INFINITY;
         
-        for i in 0..dim {
-            let val = logits.get([i]).to_scalar().unwrap();
+        for (i, &val) in logits.iter().enumerate() {
             if val > max_val {
                 max_val = val;
                 max_idx = i;

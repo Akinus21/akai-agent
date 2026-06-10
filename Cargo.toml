@@ -38,8 +38,6 @@ rmp-serde          = "1"
 rmp               = "0.8"
 
 ggus = "0.5"
-burn = { version = "0.21", features = ["ndarray"] }
-burn-ndarray = "0.21"
 
 [profile.release]
 opt-level     = 3
