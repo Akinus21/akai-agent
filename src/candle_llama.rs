@@ -1,9 +1,9 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::quantized_llama::{Config, Llama, ModelWeights};
+use candle_transformers::models::quantized_llama::{Config, ModelWeights};
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::info;
 
 pub struct LayerLlama {
     model: ModelWeights,
@@ -23,10 +23,10 @@ impl LayerLlama {
             model_path, layer_offset, num_layers);
 
         let device = Device::Cpu;
-        let dtype = DType::F32;
 
-        // Load the GGUF file using candle's VarBuilder
-        let vb = VarBuilder::from_gguf(model_path, device)?;
+        // Load the GGUF file using candle's loader
+        // The VarBuilder from gguf expects a file path
+        let vb = VarBuilder::from_gguf(model_path, DType::F32, device)?;
 
         // Get config from the GGUF file
         let config: Config = vb.get_config()?;
@@ -64,14 +64,13 @@ impl LayerLlama {
 
     /// Run embedding on input token IDs
     pub fn embed_tokens(&mut self, input_ids: &[i64]) -> Result<Tensor> {
-        let input = Tensor::new(input_ids, &Device::Cpu)?;
+        let input = Tensor::from_slice(input_ids, [input_ids.len()])?;
         self.model.tok_embeddings.forward(&input)
     }
 
     /// Run forward pass through assigned layers only
     pub fn forward_layers(&mut self, x: Tensor, start_layer: usize, num_layers: usize) -> Result<Tensor> {
         // Iterate through our assigned layers
-        // The model has all layers, but we only process our range
         let end_layer = start_layer + num_layers;
         
         let mut x = x;
@@ -96,8 +95,8 @@ impl LayerLlama {
     pub fn sample(&mut self, logits: &Tensor, temperature: f32, _max_tokens: usize) -> Result<(Vec<i64>, String)> {
         let logits = logits.squeeze(0)?;
         
-        // Apply temperature if > 0
-        let logits = if temperature > 0.0 && temperature != 1.0 {
+        // Apply temperature if > 0 and not 1.0
+        let logits = if temperature > 0.0 && (temperature - 1.0).abs() > 0.001 {
             let scale = 1.0 / temperature;
             let scale_tensor = Tensor::new(scale, &Device::Cpu)?;
             candle_core::Tensor::mul(&logits, &scale_tensor)?
@@ -109,11 +108,11 @@ impl LayerLlama {
         let probs = candle_core::Tensor::softmax(&logits, 0)?;
 
         // Argmax - find the token with highest probability
+        let dims = probs.shape().dims();
+        let dim = dims[0];
+        
         let mut max_idx = 0usize;
         let mut max_val = f32::NEG_INFINITY;
-        
-        let shape = probs.shape();
-        let dim = shape.elem();
         
         for i in 0..dim {
             let val = probs.get(i)?;

@@ -62,16 +62,13 @@ impl CandleServer {
         let num_tokens = hidden_states.len() / hidden_size;
 
         // Reshape hidden states to 2D tensor
-        let hidden = hidden_states.reshape([num_tokens, hidden_size])?;
+        let hidden = Tensor::from_slice(hidden_states, [num_tokens, hidden_size])?;
 
         // Run forward through our assigned layers
         let output = model.forward_hidden(&hidden, model.num_layers())?;
 
         // Convert back to Vec<f32>
-        let output_shape = output.shape();
-        let total_elems = output_shape.dims()[0] * output_shape.dims()[1];
-        let mut output_vec = vec![0.0_f32; total_elems];
-        output.to_vec1(&mut output_vec)?;
+        let output_vec = output.to_vec1()?;
 
         Ok(output_vec)
     }
@@ -82,7 +79,7 @@ impl CandleServer {
 
         let hidden_size = model.hidden_size();
         let num_tokens = hidden_states.len() / hidden_size;
-        let hidden = hidden_states.reshape([num_tokens, hidden_size])?;
+        let hidden = Tensor::from_slice(hidden_states, [num_tokens, hidden_size])?;
 
         // Run forward through all our layers
         let output = model.forward_hidden(&hidden, model.num_layers())?;
