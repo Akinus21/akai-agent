@@ -57,19 +57,19 @@ impl CandleServer {
         let mut model_guard = self.model.lock().await;
         let model = model_guard.as_mut().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
 
-        let output = model.forward_hidden(hidden_states)?;
+        let num_tokens = 1; // single token processing for now
+        let output = model.forward_layers(hidden_states, num_tokens)?;
         Ok(output)
     }
 
-    pub async fn generate(&self, hidden_states: &[f32], max_tokens: usize, temperature: f32) -> Result<(Vec<i64>, String)> {
+    pub async fn generate(&self, hidden_states: &[f32], _max_tokens: usize, temperature: f32) -> Result<(Vec<i64>, String)> {
         let mut model_guard = self.model.lock().await;
         let model = model_guard.as_mut().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
 
-        // Apply lm_head first (stub - just passes through)
-        let after_lm = model.lm_head(hidden_states)?;
-        
-        // Then sample
-        let (tokens, text) = model.sample(&after_lm, temperature)?;
+        let num_tokens = 1;
+        let after_layers = model.forward_layers(hidden_states, num_tokens)?;
+        let logits = model.project(&after_layers, num_tokens)?;
+        let (tokens, text) = model.sample(&logits, temperature)?;
 
         Ok((tokens, text))
     }

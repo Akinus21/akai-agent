@@ -52,7 +52,7 @@ impl LayerLlama {
         let file = File::open(model_path)?;
         let mut reader = BufReader::new(file);
         
-        let gguf = GGufReader::read(&mut reader)?;
+        let gguf = GGufReader::read(reader)?;
         let metadata = gguf.metadata();
         
         let hidden_size: usize = metadata.get_i32("hidden_size").unwrap_or(4096) as usize;
