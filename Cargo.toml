@@ -37,8 +37,6 @@ rustls-pemfile     = "2"
 rmp-serde          = "1"
 rmp               = "0.8"
 
-ggus = "0.5"
-
 [profile.release]
 opt-level     = 3
 lto           = true
