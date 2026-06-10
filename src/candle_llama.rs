@@ -95,7 +95,7 @@ impl LayerLlama {
             let meta = reader.read_tensor_meta().map_err(|e| anyhow::anyhow!("GGufReadError: {:?}", e))?;
             let name = meta.name().to_string();
             let info = meta.to_info();
-            let n_elements: usize = info.shape().iter().copied().product();
+            let n_elements: usize = info.shape().iter().copied().product::<u64>() as usize;
             tensor_info.insert(name, (info.offset(), info.nbytes(), n_elements, info.ty()));
         }
         
