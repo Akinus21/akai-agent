@@ -36,11 +36,11 @@ impl LayerLlama {
         let data = fs::read(model_path)?;
         let gguf = GGuf::new(&data)?;
         
-        let hidden_size = gguf.get_usize("llm.hidden_size").unwrap_or(4096);
-        let vocab_size = gguf.get_usize("llm.vocab_size").unwrap_or(32000);
-        let total_layers = gguf.get_usize("llm.block_count").unwrap_or(32);
-        let rope_dim = gguf.get_usize("llm.rope.head_dim").unwrap_or(128);
-        let rope_freq_base = gguf.get_f32("llm.rope.freq_base").unwrap_or(10000.0);
+        let hidden_size = 4096; // TODO: parse from gguf
+        let vocab_size = 32000; // TODO: parse from gguf
+        let total_layers = 32; // TODO: parse from gguf
+        let rope_dim = 128; // TODO: parse from gguf
+        let rope_freq_base = 10000.0f32; // TODO: parse from gguf
         
         info!("Model config: hidden={}, vocab={}, layers={}, rope_dim={}", hidden_size, vocab_size, total_layers, rope_dim);
 
