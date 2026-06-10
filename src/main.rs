@@ -1,5 +1,8 @@
 mod auth;
 mod build;
+mod candle_llama;
+mod candle_server;
+mod candle_worker;
 mod cli;
 mod config;
 mod gpu;

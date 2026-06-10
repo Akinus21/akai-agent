@@ -13,7 +13,7 @@ use crate::types::{
     HubMessage, HubWorkerConfig, InferenceForward, InferenceResponse,
     PipelineState, WorkerHeartbeat, WorkerInfo,
 };
-use crate::{inbound, rpc, rpc_client};
+use crate::{candle_worker, inbound, rpc, rpc_client};
 
 pub fn notify(title: &str, body: &str) {
     info!("[notify] {}: {}", title, body);
@@ -612,31 +612,29 @@ async fn handle_hub_message(
                                                     pipeline_guard.ready_for_inference = true;
                                                     drop(pipeline_guard);
 
-                                                    // Spawn rpc-server AFTER model is ready
+                                                    // Spawn Candle server AFTER model is ready
                                                     let rpc_port = config.rpc_port + 1;
-                                                    let rpc_path = rpc::rpc_binary_path();
-                                                    if !rpc_path.exists() {
-                                                        rpc::ensure_rpc_server().await.ok();
-                                                    }
-                                                    let rc = rpc_child.clone();
-                                                    match rpc::spawn_rpc_server(&rpc_path, rpc_port, layer_offset, num_layers) {
-                                                        Ok(child) => {
-                                                            rc.lock().await.replace(child);
-                                                            let mp = model_path.to_string_lossy().to_string();
-                                                            let pc = pipeline_clone.clone();
-                                                            tokio::spawn(async move {
-                                                                tokio::time::sleep(Duration::from_secs(2)).await;
-                                                                let c = rpc_client::RpcClient::new("127.0.0.1", rpc_port);
-                                                                if c.init(&mp, layer_offset, num_layers).await.is_ok() {
-                                                                    let mut g = pc.write().await;
-                                                                    g.rpc_server_started = true;
-                                                                    g.ready_for_inference = true;
-                                                                    g.loaded_layer_offset = Some(layer_offset);
-                                                                    g.loaded_num_layers = Some(num_layers);
-                                                                }
-                                                            });
+                                                    let mp = model_path.to_string_lossy().to_string();
+                                                    let pc = pipeline_clone.clone();
+
+                                                    match candle_worker::CandleWorker::start(
+                                                        rpc_port,
+                                                        mp.clone(),
+                                                        layer_offset,
+                                                        num_layers,
+                                                    ).await {
+                                                        Ok(_worker) => {
+                                                            info!("Candle server started on port {}", rpc_port);
+                                                            let mut g = pc.write().await;
+                                                            g.rpc_server_started = true;
+                                                            g.ready_for_inference = true;
+                                                            g.loaded_layer_offset = Some(layer_offset);
+                                                            g.loaded_num_layers = Some(num_layers);
+                                                            drop(g);
                                                         }
-                                                        Err(e) => error!("Failed to spawn rpc-server: {}", e),
+                                                        Err(e) => {
+                                                            error!("Failed to spawn Candle server: {}", e);
+                                                        }
                                                     }
 
                                                     notify(
