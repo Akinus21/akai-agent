@@ -1,8 +1,7 @@
-use anyhow::{bail, Result};
-use candle_core::{DType, Device, Tensor};
+use anyhow::Result;
+use candle_core::{DType, Device, Tensor, Shape};
 use candle_nn::VarBuilder;
 use candle_transformers::models::quantized_llama::{Config, ModelWeights};
-use std::path::Path;
 use tracing::info;
 
 pub struct LayerLlama {
@@ -24,9 +23,8 @@ impl LayerLlama {
 
         let device = Device::Cpu;
 
-        // Load the GGUF file using candle's loader
-        // Try using from_gguf_file method
-        let vb = VarBuilder::from_gguf_file(model_path)?;
+        // Load GGUF file - use from_gguf which takes path and device
+        let vb = VarBuilder::from_gguf(model_path, device)?;
 
         // Get config from the GGUF file
         let config: Config = vb.get_config()?;
@@ -64,13 +62,13 @@ impl LayerLlama {
 
     /// Run embedding on input token IDs
     pub fn embed_tokens(&mut self, input_ids: &[i64]) -> Result<Tensor> {
-        let input = Tensor::from_slice(input_ids, [input_ids.len()])?;
+        let shape = Shape::from_dims(&[input_ids.len()]);
+        let input = Tensor::new(input_ids, shape, &Device::Cpu)?;
         self.model.tok_embeddings.forward(&input)
     }
 
     /// Run forward pass through assigned layers only
     pub fn forward_layers(&mut self, x: Tensor, start_layer: usize, num_layers: usize) -> Result<Tensor> {
-        // Iterate through our assigned layers
         let end_layer = start_layer + num_layers;
         
         let mut x = x;
@@ -95,19 +93,16 @@ impl LayerLlama {
     pub fn sample(&mut self, logits: &Tensor, temperature: f32, _max_tokens: usize) -> Result<(Vec<i64>, String)> {
         let logits = logits.squeeze(0)?;
         
-        // Apply temperature if > 0 and not 1.0
         let logits = if temperature > 0.0 && (temperature - 1.0).abs() > 0.001 {
             let scale = 1.0 / temperature;
-            let scale_tensor = Tensor::new(scale, &Device::Cpu)?;
+            let scale_tensor = Tensor::new(scale, Shape::from_dims(&[1]), &Device::Cpu)?;
             candle_core::Tensor::mul(&logits, &scale_tensor)?
         } else {
             logits
         };
 
-        // Softmax for probabilities
         let probs = candle_core::Tensor::softmax(&logits, 0)?;
 
-        // Argmax - find the token with highest probability
         let dims = probs.shape().dims();
         let dim = dims[0];
         
