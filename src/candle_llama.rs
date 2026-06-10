@@ -25,8 +25,10 @@ impl LayerLlama {
         let device = Device::Cpu;
 
         // Load the GGUF file using candle's loader
-        // The VarBuilder from gguf expects a file path
-        let vb = VarBuilder::from_gguf(model_path, DType::F32, device)?;
+        // Use mmap to load the file
+        let file = std::fs::File::open(model_path)?;
+        let reader = std::io::BufReader::new(file);
+        let vb = VarBuilder::from_reader(reader, DType::F32)?;
 
         // Get config from the GGUF file
         let config: Config = vb.get_config()?;
