@@ -42,20 +42,46 @@ impl LayerLlama {
         info!("GGUF version: {}, tensors: {}, metadata: {}", 
             header.version, header.tensor_count, header.metadata_kv_count);
         
-        // Read all metadata into a map
-        let mut metadata = HashMap::new();
+        // Read metadata and collect config values
+        let mut hidden_size = 4096usize;
+        let mut vocab_size = 32000usize;
+        let mut total_layers = 32usize;
+        let mut rope_dim = 128usize;
+        let mut rope_freq_base = 10000.0f32;
+        
         for _ in 0..header.metadata_kv_count {
             let kv = reader.read_meta_kv().map_err(|e| anyhow::anyhow!("GGufReadError: {:?}", e))?;
             let key = kv.key().to_string();
-            metadata.insert(key, kv.value().clone());
+            
+            match key.as_str() {
+                "llama.embedding_length" => {
+                    if let GGufMetaDataValueType::Uint32(v) = kv.value() {
+                        hidden_size = *v as usize;
+                    }
+                }
+                "llama.vocab_size" => {
+                    if let GGufMetaDataValueType::Uint32(v) = kv.value() {
+                        vocab_size = *v as usize;
+                    }
+                }
+                "llama.block_count" => {
+                    if let GGufMetaDataValueType::Uint32(v) = kv.value() {
+                        total_layers = *v as usize;
+                    }
+                }
+                "llama.rope.dimension_count" => {
+                    if let GGufMetaDataValueType::Uint32(v) = kv.value() {
+                        rope_dim = *v as usize;
+                    }
+                }
+                "llama.rope.freq_base" => {
+                    if let GGufMetaDataValueType::Float32(v) = kv.value() {
+                        rope_freq_base = *v;
+                    }
+                }
+                _ => {}
+            }
         }
-        
-        // Extract config from metadata
-        let hidden_size = get_u32(&metadata, "llama.embedding_length").unwrap_or(4096) as usize;
-        let vocab_size = get_u32(&metadata, "llama.vocab_size").unwrap_or(32000) as usize;
-        let total_layers = get_u32(&metadata, "llama.block_count").unwrap_or(32) as usize;
-        let rope_dim = get_u32(&metadata, "llama.rope.dimension_count").unwrap_or(128) as usize;
-        let rope_freq_base = get_f32(&metadata, "llama.rope.freq_base").unwrap_or(10000.0);
         
         info!("Model config: hidden={}, vocab={}, layers={}, rope_dim={}", hidden_size, vocab_size, total_layers, rope_dim);
 
@@ -64,7 +90,7 @@ impl LayerLlama {
         // Build tensor info map
         let mut tensor_info = HashMap::new();
         for _ in 0..header.tensor_count {
-            let meta = reader.read_tensor_meta()?;
+            let meta = reader.read_tensor_meta().map_err(|e| anyhow::anyhow!("GGufReadError: {:?}", e))?;
             let name = meta.name.to_string();
             let n_elements: usize = meta.shape.iter().product();
             tensor_info.insert(name, (meta.tensor_data_offset, meta.nbytes, n_elements, meta.ty));
@@ -170,25 +196,6 @@ impl LayerLlama {
         
         Ok((vec![max_idx as i64], format!("token_{}", max_idx)))
     }
-}
-
-fn get_u32(metadata: &HashMap<String, GGufMetaDataValueType>, key: &str) -> Option<u32> {
-    metadata.get(key).and_then(|v| {
-        match v {
-            GGufMetaDataValueType::Uint32(v) => Some(*v),
-            GGufMetaDataValueType::Int32(v) => Some(*v as u32),
-            _ => None,
-        }
-    })
-}
-
-fn get_f32(metadata: &HashMap<String, GGufMetaDataValueType>, key: &str) -> Option<f32> {
-    metadata.get(key).and_then(|v| {
-        match v {
-            GGufMetaDataValueType::Float32(v) => Some(*v),
-            _ => None,
-        }
-    })
 }
 
 fn load_tensor_f32(data: &[u8], tensor_info: &HashMap<String, (usize, usize, usize, GGmlType)>, name: &str) -> Result<Option<Vec<f32>>> {
