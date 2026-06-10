@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use burn::tensor::{Tensor, Shape};
-use burn::prelude::*;
+use burn::backend::NdArray;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,6 +8,8 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
 use crate::candle_llama::LayerLlama;
+
+type Backend = NdArray;
 
 const CMD_HELLO: u8 = 14;
 const CMD_INIT: u8 = 1;
@@ -62,16 +64,15 @@ impl CandleServer {
         let hidden_size = model.hidden_size();
         let num_tokens = hidden_states.len() / hidden_size;
 
-        // Create burn tensor
-        let hidden: Tensor<f32, 2> = Tensor::from_data(hidden_states.iter().cloned().map(|v| v as f32).collect())
+        // Create burn tensor with ndarray backend
+        let data: Tensor<Backend, 2> = Tensor::from_floats(hidden_states)
             .reshape([num_tokens, hidden_size]);
 
-        let output = model.forward_hidden(hidden, model.num_layers())?;
+        let output = model.forward_hidden(data, model.num_layers())?;
 
         // Convert back to Vec<f32>
-        let data = output.to_data().to_vec::<f32>();
+        let data = output.to_data().to_vec::<f32>().unwrap_or_default();
         Ok(data)
-
     }
 
     pub async fn generate(&self, hidden_states: &[f32], max_tokens: usize, temperature: f32) -> Result<(Vec<i64>, String)> {
@@ -81,10 +82,10 @@ impl CandleServer {
         let hidden_size = model.hidden_size();
         let num_tokens = hidden_states.len() / hidden_size;
 
-        let hidden: Tensor<f32, 2> = Tensor::from_data(hidden_states.iter().cloned().map(|v| v as f32).collect())
+        let data: Tensor<Backend, 2> = Tensor::from_floats(hidden_states)
             .reshape([num_tokens, hidden_size]);
 
-        let output = model.forward_hidden(hidden, model.num_layers())?;
+        let output = model.forward_hidden(data, model.num_layers())?;
         let logits = model.lm_head(output)?;
 
         let logits = logits.reshape([logits.dims()[1]]);

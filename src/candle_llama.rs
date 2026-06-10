@@ -1,7 +1,10 @@
 use anyhow::Result;
 use burn::tensor::{Tensor, Shape};
 use burn::prelude::*;
+use burn::backend::NdArray;
 use tracing::info;
+
+type Backend = NdArray;
 
 pub struct LayerLlama {
     hidden_size: usize,
@@ -43,17 +46,17 @@ impl LayerLlama {
     }
 
     /// Run forward on pre-computed hidden states
-    pub fn forward_hidden(&mut self, hidden: Tensor<f32, 2>, _num_layers: usize) -> Result<Tensor<f32, 2>> {
+    pub fn forward_hidden(&mut self, hidden: Tensor<Backend, 2>, _num_layers: usize) -> Result<Tensor<Backend, 2>> {
         Ok(hidden)
     }
 
     /// Run lm_head projection (just return hidden for stub)
-    pub fn lm_head(&mut self, hidden: Tensor<f32, 2>) -> Result<Tensor<f32, 2>> {
+    pub fn lm_head(&mut self, hidden: Tensor<Backend, 2>) -> Result<Tensor<Backend, 2>> {
         Ok(hidden)
     }
 
     /// Sample from logits
-    pub fn sample(&mut self, logits: Tensor<f32, 1>, _temperature: f32) -> Result<(Vec<i64>, String)> {
+    pub fn sample(&mut self, logits: Tensor<Backend, 1>, _temperature: f32) -> Result<(Vec<i64>, String)> {
         let dims = logits.dims();
         let dim = dims[0];
         
