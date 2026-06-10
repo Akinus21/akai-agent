@@ -54,15 +54,18 @@ impl CandleServer {
     }
 
     pub async fn forward(&self, hidden_states: &[f32]) -> Result<Vec<f32>> {
-        let model_guard = self.model.lock().await;
-        let model = model_guard.as_ref().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
+        let mut model_guard = self.model.lock().await;
+        let model = model_guard.as_mut().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
 
-        // Convert hidden states to tensor
-        let num_tokens = hidden_states.len() / model.hidden_size();
-        let hidden = Tensor::from_slice(hidden_states, [num_tokens, model.hidden_size()])?;
+        // Determine hidden size from model
+        let hidden_size = model.hidden_size();
+        let num_tokens = hidden_states.len() / hidden_size;
 
-        // Run forward through our layers
-        let output = model.forward_hidden(&hidden)?;
+        // Reshape hidden states to 2D tensor
+        let hidden = Tensor::from_vec(hidden_states.to_vec(), [num_tokens, hidden_size])?;
+
+        // Run forward through our assigned layers
+        let output = model.forward_hidden(&hidden, model.num_layers())?;
 
         // Convert back to Vec<f32>
         let output_shape = output.shape();
@@ -73,15 +76,18 @@ impl CandleServer {
     }
 
     pub async fn generate(&self, hidden_states: &[f32], max_tokens: usize, temperature: f32) -> Result<(Vec<i64>, String)> {
-        let model_guard = self.model.lock().await;
-        let model = model_guard.as_ref().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
+        let mut model_guard = self.model.lock().await;
+        let model = model_guard.as_mut().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
 
-        // Convert hidden states to tensor
-        let num_tokens = hidden_states.len() / model.hidden_size();
-        let hidden = Tensor::from_slice(hidden_states, [num_tokens, model.hidden_size()])?;
+        let hidden_size = model.hidden_size();
+        let num_tokens = hidden_states.len() / hidden_size;
+        let hidden = Tensor::from_vec(hidden_states.to_vec(), [num_tokens, hidden_size])?;
+
+        // Run forward through all our layers
+        let output = model.forward_hidden(&hidden, model.num_layers())?;
 
         // Get logits from lm_head
-        let logits = model.lm_head(&hidden)?;
+        let logits = model.lm_head(&output)?;
 
         // Sample
         let (tokens, text) = model.sample(&logits, temperature, max_tokens)?;
@@ -109,7 +115,7 @@ async fn write_message(stream: &mut TcpStream, data: &[u8]) -> Result<()> {
 
 async fn handle_hello(stream: &mut TcpStream) -> Result<()> {
     info!("HELLO received");
-    let response = vec![0, 3, 0]; // major=0, minor=3, patch=0 (Candle version placeholder)
+    let response = vec![0, 10, 0]; // major=0, minor=10, patch=0 (Candle 0.10.x)
     write_message(stream, &response).await?;
     Ok(())
 }
@@ -117,7 +123,7 @@ async fn handle_hello(stream: &mut TcpStream) -> Result<()> {
 async fn handle_init(stream: &mut TcpStream, data: &[u8], server: &CandleServer) -> Result<()> {
     info!("INIT received: {} bytes", data.len());
 
-    // Parse INIT message: model_path\u0layer_offset(8)\u0num_layers(8)
+    // Parse INIT message: model_path\u0layer_offset\u0num_layers
     let msg = String::from_utf8_lossy(data);
     let parts: Vec<&str> = msg.split('\0').collect();
 
@@ -139,11 +145,7 @@ async fn handle_init(stream: &mut TcpStream, data: &[u8], server: &CandleServer)
 async fn handle_forward(stream: &mut TcpStream, data: &[u8], server: &CandleServer) -> Result<()> {
     info!("FORWARD received: {} bytes", data.len());
 
-    // Parse FORWARD: hidden_states[f32] + layer_offset(8) + num_layers(8)
-    // Hidden states are variable length, we need to read the rest
-    // For simplicity, assume all remaining data is hidden states
-    // TODO: Make this more robust
-
+    // Data is hidden_states as f32 bytes
     let hidden_states: Vec<f32> = data
         .chunks(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
@@ -165,12 +167,11 @@ async fn handle_forward(stream: &mut TcpStream, data: &[u8], server: &CandleServ
 async fn handle_generate(stream: &mut TcpStream, data: &[u8], server: &CandleServer) -> Result<()> {
     info!("GENERATE received: {} bytes", data.len());
 
-    // Parse GENERATE: hidden_states[f32] + max_tokens(4) + temp(4)
+    // Parse GENERATE: max_tokens(4) + temp(4) + hidden_states[f32]
     if data.len() < 8 {
         bail!("GENERATE message too short");
     }
 
-    // Read max_tokens and temperature from end
     let max_tokens = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
     let temperature = f32::from_le_bytes([data[4], data[5], data[6], data[7]]);
 

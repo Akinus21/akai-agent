@@ -1,12 +1,11 @@
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::candle_server::{run_server, CandleServer};
 
 pub struct CandleWorker {
-    server: Arc<CandleServer>,
     _join_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -25,7 +24,7 @@ impl CandleWorker {
         server.init_model(&model_path).await?;
 
         // Spawn the server task
-        let server_clone = server.clone();
+        let server_clone = server;
         let join_handle = tokio::spawn(async move {
             if let Err(e) = run_server(port, layer_offset, num_layers).await {
                 error!("Candle server error: {}", e);
@@ -33,12 +32,7 @@ impl CandleWorker {
         });
 
         Ok(Self {
-            server,
             _join_handle: join_handle,
         })
-    }
-
-    pub async fn is_ready(&self) -> bool {
-        self.server.is_ready().await
     }
 }

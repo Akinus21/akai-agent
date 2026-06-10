@@ -37,9 +37,9 @@ rustls-pemfile     = "2"
 rmp-serde          = "1"
 rmp               = "0.8"
 
-candle-core = { version = "0.3", git = "https://github.com/huggingface/candle" }
-candle-nn = { version = "0.3", git = "https://github.com/huggingface/candle" }
-candle-transformers = { version = "0.3", git = "https://github.com/huggingface/candle" }
+candle-core = { version = "0.10", git = "https://github.com/huggingface/candle" }
+candle-nn = { version = "0.10", git = "https://github.com/huggingface/candle" }
+candle-transformers = { version = "0.10", git = "https://github.com/huggingface/candle" }
 
 [profile.release]
 opt-level     = 3
