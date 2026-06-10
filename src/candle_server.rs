@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use candle_core::Tensor;
+use candle_core::{Device, Tensor};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -63,7 +63,7 @@ impl CandleServer {
         let num_tokens = hidden_states.len() / hidden_size;
 
         // Reshape hidden states to 2D tensor
-        let hidden = Tensor::from_slice(hidden_states, [num_tokens, hidden_size])?;
+        let hidden = Tensor::from_slice(hidden_states, [num_tokens, hidden_size], &Device::Cpu)?;
 
         // Run forward through our assigned layers
         let output = model.forward_hidden(&hidden, model.num_layers())?;
@@ -80,7 +80,7 @@ impl CandleServer {
 
         let hidden_size = model.hidden_size();
         let num_tokens = hidden_states.len() / hidden_size;
-        let hidden = Tensor::from_slice(hidden_states, [num_tokens, hidden_size])?;
+        let hidden = Tensor::from_slice(hidden_states, [num_tokens, hidden_size], &Device::Cpu)?;
 
         // Run forward through all our layers
         let output = model.forward_hidden(&hidden, model.num_layers())?;
