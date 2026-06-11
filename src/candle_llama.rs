@@ -222,27 +222,34 @@ fn load_tensor_f32(data: &[u8], tensor_info: &HashMap<String, (usize, usize, usi
                 }
             }
             GGmlType::Q8_0 => {
-                let block_size = 32;
-                let num_blocks = (*n_elements + block_size - 1) / block_size;
-                for bi in 0..num_blocks {
-                    let block_offset = bi * (block_size + 4);
-                    if block_offset + block_size + 4 > tensor_data.len() { break; }
-                    let scale = f32::from_le_bytes([
-                        tensor_data[block_offset],
-                        tensor_data[block_offset + 1],
-                        tensor_data[block_offset + 2],
-                        tensor_data[block_offset + 3],
-                    ]);
-                    for i in 0..block_size {
-                        let idx = bi * block_size + i;
-                        if idx >= *n_elements { break; }
-                        let val = tensor_data[block_offset + 4 + i] as i8;
-                        float_data[idx] = val as f32 * scale;
+                let block_size = std::mem::size_of::<Q8_0>();
+                let num_blocks = (*n_elements + 31) / 32;
+                let bytes_per_block = block_size;
+                let expected_bytes = num_blocks * bytes_per_block;
+                if tensor_data.len() < expected_bytes {
+                    info!("Q8_0 tensor {} has insufficient data: {} bytes, expected {}", 
+                        name, tensor_data.len(), expected_bytes);
+                    return Ok(None);
+                }
+                let blocks: &[Q8_0] = unsafe {
+                    std::slice::from_raw_parts(
+                        tensor_data.as_ptr() as *const Q8_0,
+                        num_blocks
+                    )
+                };
+                let mut offset = 0;
+                for block in blocks {
+                    let dequant = block.dequantize();
+                    for &v in &dequant {
+                        if offset < *n_elements {
+                            float_data[offset] = v;
+                            offset += 1;
+                        }
                     }
                 }
             }
             _ => {
-                info!("Unsupported tensor type {:?} for {}, skipping", ty, name);
+                info!("Unsupported tensor type {:?} for {}, skipping (need to add support)", ty, name);
                 return Ok(None);
             }
         }
