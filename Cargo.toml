@@ -37,6 +37,7 @@ rustls-pemfile     = "2"
 rmp-serde          = "1"
 rmp               = "0.8"
 ggus = "0.5"
+ggml-quants = "0.1"
 half = "2"
 
 [profile.release]

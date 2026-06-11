@@ -413,8 +413,8 @@ async fn handle_hub_message(
                             if !need_download {
                                 info!("Model file already exists and hash matches, skipping download");
                                 if !pipeline_clone.read().await.ready_for_inference {
-                                    let layer_offset = pipeline_guard.layer_offset;
-                                    let num_layers = pipeline_guard.num_layers;
+                                    let layer_offset = layer_offset;
+                                    let num_layers = num_layers;
                                     let rpc_port = config.rpc_port + 1;
                                     let mp = model_path.to_string_lossy().to_string();
 

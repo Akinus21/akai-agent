@@ -1,5 +1,7 @@
 use anyhow::{bail, Result};
 use ggus::{GGufReader, GGmlType, GGufMetaDataValueType};
+use ggml_quants::{Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2K, Q3K, Q4K, Q5K, Q6K, Q8K};
+use ggml_quants::QuantExt;
 use std::fs;
 use std::collections::HashMap;
 use tracing::info;
