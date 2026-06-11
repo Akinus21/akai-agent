@@ -219,6 +219,26 @@ fn load_tensor_f32(data: &[u8], tensor_info: &HashMap<String, (usize, usize, usi
                     float_data[i] = half::f16::from_bits(bits).to_f32();
                 }
             }
+            GGmlType::Q8_0 => {
+                let block_size = 32;
+                let num_blocks = (*n_elements + block_size - 1) / block_size;
+                for bi in 0..num_blocks {
+                    let block_offset = bi * (block_size + 4);
+                    if block_offset + block_size + 4 > tensor_data.len() { break; }
+                    let scale = f32::from_le_bytes([
+                        tensor_data[block_offset],
+                        tensor_data[block_offset + 1],
+                        tensor_data[block_offset + 2],
+                        tensor_data[block_offset + 3],
+                    ]);
+                    for i in 0..block_size {
+                        let idx = bi * block_size + i;
+                        if idx >= *n_elements { break; }
+                        let val = tensor_data[block_offset + 4 + i] as i8;
+                        float_data[idx] = val as f32 * scale;
+                    }
+                }
+            }
             _ => {
                 info!("Unsupported tensor type {:?} for {}, skipping", ty, name);
                 return Ok(None);
