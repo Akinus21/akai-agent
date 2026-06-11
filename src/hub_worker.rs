@@ -594,9 +594,10 @@ async fn handle_hub_message(
                                 }
                             }
 
-if model_path.exists() && !pipeline_guard.ready_for_inference {
-                                let layer_offset = pipeline_guard.layer_offset;
-                                let num_layers = pipeline_guard.num_layers;
+if model_path.exists() && !pipeline_clone.read().await.ready_for_inference {
+                                let mut pg = pipeline_clone.write().await;
+                                let layer_offset = pg.layer_offset;
+                                let num_layers = pg.num_layers;
                                 let rpc_port = config.rpc_port + 1;
                                 let mp = model_path.to_string_lossy().to_string();
 
@@ -610,10 +611,10 @@ if model_path.exists() && !pipeline_guard.ready_for_inference {
                                     Ok(_worker) => {
                                         info!("Candle server started on port {} (layers {}-{})", 
                                             rpc_port, layer_offset, layer_offset + num_layers);
-                                        pipeline_guard.rpc_server_started = true;
-                                        pipeline_guard.ready_for_inference = true;
-                                        pipeline_guard.loaded_layer_offset = Some(layer_offset);
-                                        pipeline_guard.loaded_num_layers = Some(num_layers);
+                                        pg.rpc_server_started = true;
+                                        pg.ready_for_inference = true;
+                                        pg.loaded_layer_offset = Some(layer_offset);
+                                        pg.loaded_num_layers = Some(num_layers);
                                         notify(
                                             "akai-agent",
                                             &format!(
