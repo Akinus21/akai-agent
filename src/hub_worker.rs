@@ -412,34 +412,45 @@ async fn handle_hub_message(
 
                             if !need_download {
                                 info!("Model file already exists and hash matches, skipping download");
-                                if !pipeline_clone.read().await.llama_server_started {
-                                    if let Ok(llama_path) = rpc::ensure_llama_server().await {
-                                        let ngl = if has_gpu { -1 } else { 0 };
-                                        match rpc::spawn_llama_server(
-                                            &llama_path,
-                                            &model_path.to_string_lossy(),
-                                            ngl,
-                                            llama_port,
-                                            layer_offset,
-                                            num_layers,
-                                        ) {
-                                            Ok(llama_cmd) => {
-                                                info!("llama-server started on port {}", llama_port);
-                                                llama_child_clone.lock().await.replace(llama_cmd);
-                                                let mut pg = pipeline_clone.write().await;
-                                                pg.llama_server_started = true;
-                                                pg.ready_for_inference = true;
-                                                notify(
-                                                    "akai-agent",
-                                                    &format!(
-                                                        "{} ready for inference on port {}",
-                                                        model_name, llama_port
-                                                    ),
-                                                );
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to spawn llama-server: {}", e);
-                                            }
+                                if !pipeline_clone.read().await.ready_for_inference {
+                                    let layer_offset = pipeline_guard.layer_offset;
+                                    let num_layers = pipeline_guard.num_layers;
+                                    let rpc_port = config.rpc_port + 1;
+                                    let mp = model_path.to_string_lossy().to_string();
+
+                                    info!("Starting custom Candle inference server...");
+                                    match candle_worker::CandleWorker::start(
+                                        rpc_port,
+                                        mp,
+                                        layer_offset,
+                                        num_layers,
+                                    ).await {
+                                        Ok(_worker) => {
+                                            info!("Candle server started on port {} (layers {}-{})", 
+                                                rpc_port, layer_offset, layer_offset + num_layers);
+                                            let mut pg = pipeline_clone.write().await;
+                                            pg.rpc_server_started = true;
+                                            pg.ready_for_inference = true;
+                                            pg.loaded_layer_offset = Some(layer_offset);
+                                            pg.loaded_num_layers = Some(num_layers);
+                                            notify(
+                                                "akai-agent",
+                                                &format!(
+                                                    "{} ready for inference on port {} (custom Candle)",
+                                                    model_name, rpc_port
+                                                ),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            error!("CRITICAL: Custom Candle inference server failed to start: {}", e);
+                                            error!("Falling back to llama-server is disabled.");
+                                            notify(
+                                                "akai-agent",
+                                                &format!(
+                                                    "CUSTOM IMPLEMENTATION FAILED: {} - not falling back to llama-server",
+                                                    e
+                                                ),
+                                            );
                                         }
                                     }
                                 }
@@ -583,92 +594,44 @@ async fn handle_hub_message(
                                 }
                             }
 
-                            if model_path.exists() {
-                                let mut pipeline_guard = pipeline_clone.write().await;
+if model_path.exists() && !pipeline_guard.ready_for_inference {
                                 let layer_offset = pipeline_guard.layer_offset;
                                 let num_layers = pipeline_guard.num_layers;
-                                if !pipeline_guard.llama_server_started {
-                                    match rpc::ensure_llama_server().await {
-                                        Ok(llama_path) => {
-                                            let ngl = if has_gpu { -1 } else { 0 };
-                                            match rpc::spawn_llama_server(
-                                                &llama_path,
-                                                &model_path.to_string_lossy(),
-                                                ngl,
-                                                llama_port,
-                                                layer_offset,
-                                                num_layers,
-                                            ) {
-                                                Ok(llama_cmd) => {
-                                                    info!(
-                                                        "llama-server started on port {}",
-                                                        llama_port
-                                                    );
-                                                    llama_child_clone
-                                                        .lock()
-                                                        .await
-                                                        .replace(llama_cmd);
-                                                    pipeline_guard.llama_server_started = true;
-                                                    pipeline_guard.ready_for_inference = true;
-                                                    drop(pipeline_guard);
+                                let rpc_port = config.rpc_port + 1;
+                                let mp = model_path.to_string_lossy().to_string();
 
-                                                    // Spawn Candle server AFTER model is ready
-                                                    let rpc_port = config.rpc_port + 1;
-                                                    let mp = model_path.to_string_lossy().to_string();
-                                                    let pc = pipeline_clone.clone();
-
-                                                    match candle_worker::CandleWorker::start(
-                                                        rpc_port,
-                                                        mp.clone(),
-                                                        layer_offset,
-                                                        num_layers,
-                                                    ).await {
-                                                        Ok(_worker) => {
-                                                            info!("Candle server started on port {}", rpc_port);
-                                                            let mut g = pc.write().await;
-                                                            g.rpc_server_started = true;
-                                                            g.ready_for_inference = true;
-                                                            g.loaded_layer_offset = Some(layer_offset);
-                                                            g.loaded_num_layers = Some(num_layers);
-                                                            drop(g);
-                                                        }
-                                                        Err(e) => {
-                                                            error!("Failed to spawn Candle server: {}", e);
-                                                        }
-                                                    }
-
-                                                    notify(
-                                                        "akai-agent",
-                                                        &format!(
-                                                            "{} ready for inference on port {}",
-                                                            model_name, llama_port
-                                                        ),
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    error!(
-                                                        "Failed to spawn llama-server: {}",
-                                                        e
-                                                    );
-                                                    drop(pipeline_guard);
-                                                    notify(
-                                                        "akai-agent",
-                                                        &format!(
-                                                            "Failed to start llama-server: {}",
-                                                            e
-                                                        ),
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to ensure llama-server: {}", e);
-                                            drop(pipeline_guard);
-                                            notify(
-                                                "akai-agent",
-                                                &format!("Failed to find llama-server: {}", e),
-                                            );
-                                        }
+                                info!("Starting custom Candle inference server...");
+                                match candle_worker::CandleWorker::start(
+                                    rpc_port,
+                                    mp,
+                                    layer_offset,
+                                    num_layers,
+                                ).await {
+                                    Ok(_worker) => {
+                                        info!("Candle server started on port {} (layers {}-{})", 
+                                            rpc_port, layer_offset, layer_offset + num_layers);
+                                        pipeline_guard.rpc_server_started = true;
+                                        pipeline_guard.ready_for_inference = true;
+                                        pipeline_guard.loaded_layer_offset = Some(layer_offset);
+                                        pipeline_guard.loaded_num_layers = Some(num_layers);
+                                        notify(
+                                            "akai-agent",
+                                            &format!(
+                                                "{} ready for inference on port {} (custom Candle)",
+                                                model_name, rpc_port
+                                            ),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        error!("CRITICAL: Custom Candle inference server failed to start: {}", e);
+                                        error!("Falling back to llama-server is disabled.");
+                                        notify(
+                                            "akai-agent",
+                                            &format!(
+                                                "CUSTOM IMPLEMENTATION FAILED: {} - not falling back to llama-server",
+                                                e
+                                            ),
+                                        );
                                     }
                                 }
                             }
