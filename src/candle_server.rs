@@ -238,11 +238,3 @@ pub async fn run_server(port: u16, server: Arc<CandleServer>) -> Result<()> {
         }
     }
 }
-                });
-            }
-            Err(e) => {
-                error!("Failed to accept connection: {}", e);
-            }
-        }
-    }
-}
