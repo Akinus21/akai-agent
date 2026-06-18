@@ -13,7 +13,7 @@ use crate::types::{
     HubMessage, HubWorkerConfig, InferenceForward, InferenceResponse,
     PipelineState, WorkerHeartbeat, WorkerInfo,
 };
-use crate::{candle_worker, inbound, rpc, rpc_client};
+use crate::{candle_worker, inbound, rpc};
 
 pub fn notify(title: &str, body: &str) {
     info!("[notify] {}: {}", title, body);
@@ -673,102 +673,96 @@ if model_path.exists() && !pipeline_clone.read().await.ready_for_inference {
                 return;
             }
 
-            let rpc_port = config.rpc_port + 1;
-            let client = rpc_client::RpcClient::new("127.0.0.1", rpc_port);
+            let llama_port = config.llama_port;
+            let client = reqwest::Client::new();
             
             let prompt = req.prompt.clone().unwrap_or_default();
             let max_tokens = req.max_new_tokens;
             let temperature = req.temperature;
 
-            // Unified logic: process layers, then forward or generate
             if let Some(ref hop) = next_hop {
-                // Has next hop - run forward and forward to next worker
                 info!("[self] has next_hop, running forward pass");
-                match client.forward(vec![], None).await {
-                    Ok((tokens, hidden_states)) => {
-                        info!("[rpc] forward done, hidden_states len: {}", hidden_states.len());
-                        
-                        let hidden_bytes: Vec<u8> = hidden_states.iter()
-                            .flat_map(|f| f.to_le_bytes())
-                            .collect();
-                        
-                        info!("[-> {}] Forwarding hidden states ({} bytes) to next worker at {}:{}", 
-                            hop.worker_id, hidden_bytes.len(), hop.host, hop.port);
-                        let fwd = HubMessage::InferenceForward(InferenceForward {
-                            id: req.id.clone(),
-                            from_worker: config.worker_id.clone(),
-                            to_worker: hop.worker_id.clone(),
-                            data: hidden_bytes,
-                            hub_addr: Some(config.hub_addr.clone()),
-                        });
-                        let data = encode_msg(&fwd);
-                        match tokio::net::TcpStream::connect(format!("{}:{}", hop.host, hop.port)).await {
-                            Ok(mut forward_stream) => {
-                                forward_stream.write_all(&data).await.ok();
-                                info!("[-> {}] Forwarded to next worker", hop.worker_id);
-                            }
-                            Err(e) => {
-                                error!("[-> {}] Forward failed: {}", hop.worker_id, e);
-                                let resp_msg = HubMessage::Error {
-                                    code: "FORWARD_ERROR".to_string(),
-                                    message: format!("Failed to forward to {}: {}", hop.worker_id, e),
-                                };
-                                let data = encode_msg(&resp_msg);
-                                let mut w = writer.lock().await;
-                                w.write_all(&data).await.ok();
+                let llama_url = format!("http://127.0.0.1:{}/v1/chat/completions", llama_port);
+                let body = serde_json::json!({
+                    "model": "local-model",
+                    "messages": [{"role": "user", "content": &prompt}],
+                    "max_tokens": 1,
+                    "temperature": 0.0,
+                    "stream": false
+                });
+                match client.post(&llama_url).json(&body).send().await {
+                    Ok(resp) => {
+                        if let Ok(json) = resp.json::<serde_json::Value>().await {
+                            let hidden: Vec<f32> = json["hidden_states"].as_array()
+                                .map(|a| a.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+                                .unwrap_or_default();
+                            info!("[http] forward done, hidden_states len: {}", hidden.len());
+                            
+                            let hidden_bytes: Vec<u8> = hidden.iter()
+                                .flat_map(|f| f.to_le_bytes())
+                                .collect();
+                            
+                            info!("[-> {}] Forwarding hidden states ({} bytes) to next worker at {}:{}", 
+                                hop.worker_id, hidden_bytes.len(), hop.host, hop.port);
+                            let fwd = HubMessage::InferenceForward(InferenceForward {
+                                id: req.id.clone(),
+                                from_worker: config.worker_id.clone(),
+                                to_worker: hop.worker_id.clone(),
+                                data: hidden_bytes,
+                                hub_addr: Some(config.hub_addr.clone()),
+                            });
+                            let data = encode_msg(&fwd);
+                            match tokio::net::TcpStream::connect(format!("{}:{}", hop.host, hop.port)).await {
+                                Ok(mut forward_stream) => {
+                                    forward_stream.write_all(&data).await.ok();
+                                    info!("[-> {}] Forwarded to next worker", hop.worker_id);
+                                }
+                                Err(e) => {
+                                    error!("[-> {}] Forward failed: {}", hop.worker_id, e);
+                                }
                             }
                         }
                     }
                     Err(e) => {
-                        error!("[rpc] forward failed: {}", e);
-                        let resp_msg = HubMessage::Error {
-                            code: "RPC_ERROR".to_string(),
-                            message: e.to_string(),
-                        };
-                        let data = encode_msg(&resp_msg);
-                        let mut w = writer.lock().await;
-                        w.write_all(&data).await.ok();
+                        error!("[http] forward failed: {}", e);
                     }
                 }
             } else {
-                // No next hop - last worker, run forward then generate and return to hub
-                info!("[self] last worker, running forward pass then generate");
-                match client.forward(vec![], None).await {
-                    Ok((tokens, hidden_states)) => {
-                        info!("[rpc] forward done, hidden_states len: {}", hidden_states.len());
-                        
-                        match client.generate(tokens, max_tokens, temperature).await {
-                            Ok((tokens, text)) => {
-                                info!("[rpc] generate done, text length: {} chars", text.len());
-                                let resp_msg = HubMessage::InferenceResponse(InferenceResponse {
-                                    id: req.id.clone(),
-                                    token: None,
-                                    hidden_states: None,
-                                    is_done: true,
-                                    text: Some(text),
-                                    prompt_tokens: 0,
-                                    completion_tokens: tokens.len() as u64,
-                                });
-                                let data = encode_msg(&resp_msg);
-                                let mut w = writer.lock().await;
-                                w.write_all(&data).await.ok();
-                            }
-                            Err(e) => {
-                                error!("[rpc] generate failed: {}", e);
-                                let resp_msg = HubMessage::Error {
-                                    code: "RPC_ERROR".to_string(),
-                                    message: e.to_string(),
-                                };
-                                let data = encode_msg(&resp_msg);
-                                let mut w = writer.lock().await;
-                                w.write_all(&data).await.ok();
-                            }
+                info!("[self] last worker, running generate");
+                let llama_url = format!("http://127.0.0.1:{}/v1/chat/completions", llama_port);
+                let body = serde_json::json!({
+                    "model": "local-model",
+                    "messages": [{"role": "user", "content": &prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "stream": false
+                });
+                match client.post(&llama_url).json(&body).send().await {
+                    Ok(resp) => {
+                        if let Ok(json) = resp.json::<serde_json::Value>().await {
+                            let content = json["choices"][0]["message"]["content"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string();
+                            info!("[http] generate done, text length: {} chars", content.len());
+                            let resp_msg = HubMessage::InferenceResponse(InferenceResponse {
+                                id: req.id.clone(),
+                                token: None,
+                                hidden_states: None,
+                                is_done: true,
+                                text: Some(content),
+                                prompt_tokens: 0,
+                                completion_tokens: 0,
+                            });
+                            let data = encode_msg(&resp_msg);
+                            let mut w = writer.lock().await;
+                            w.write_all(&data).await.ok();
                         }
                     }
                     Err(e) => {
-                        error!("[rpc] forward failed: {}", e);
+                        error!("[http] generate failed: {}", e);
                         let resp_msg = HubMessage::Error {
-                            code: "RPC_ERROR".to_string(),
+                            code: "HTTP_ERROR".to_string(),
                             message: e.to_string(),
                         };
                         let data = encode_msg(&resp_msg);
