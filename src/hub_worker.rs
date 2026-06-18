@@ -652,11 +652,14 @@ Ok(_worker) => {
             info!("[<- hub] InferenceRequest: id={}, is_first={}, is_last={}, max_tokens={}",
                 req.id, req.is_first, req.is_last, req.max_new_tokens);
             let pipeline_guard = pipeline.read().await;
-            let (rpc_server_started, ready_for_inference, layer_offset, num_layers) = {
-                let is_first = req.is_first;
-                let is_last = req.is_last;
-                info!("[self] is_first={}, is_last={}, layers={}-{}, rpc_server_started={}", 
-                    is_first, is_last, layer_offset, layer_offset + num_layers, rpc_server_started);
+            let next_hop = pipeline_guard.next_hop.clone();
+            let layer_offset = pipeline_guard.layer_offset;
+            let num_layers = pipeline_guard.num_layers;
+            let rpc_server_started = pipeline_guard.rpc_server_started;
+            drop(pipeline_guard);
+
+            info!("[self] is_first={}, is_last={}, layers={}-{}, rpc_server_started={}", 
+                req.is_first, req.is_last, layer_offset, layer_offset + num_layers, rpc_server_started);
 
             if !rpc_server_started {
                 error!("[self] rpc-server not started, cannot process inference");
