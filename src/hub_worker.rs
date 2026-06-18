@@ -430,7 +430,6 @@ async fn handle_hub_message(
                                                 llama_port, layer_offset, layer_offset + num_layers);
                                             let mut pg = pipeline_clone.write().await;
                                             pg.rpc_server_started = true;
-                                            pg.llama_server_started = true;
                                             pg.ready_for_inference = true;
                                             pg.loaded_layer_offset = Some(layer_offset);
                                             pg.loaded_num_layers = Some(num_layers);
@@ -609,11 +608,10 @@ if model_path.exists() && !pipeline_clone.read().await.ready_for_inference {
                                     layer_offset,
                                     num_layers,
                                 ).await {
-Ok(_worker) => {
+                                    Ok(_worker) => {
                                         info!("Candle server started on port {} (layers {}-{})", 
                                             llama_port, layer_offset, layer_offset + num_layers);
                                         pg.rpc_server_started = true;
-                                        pg.llama_server_started = true;
                                         pg.ready_for_inference = true;
                                         pg.loaded_layer_offset = Some(layer_offset);
                                         pg.loaded_num_layers = Some(num_layers);
@@ -638,20 +636,22 @@ Ok(_worker) => {
                                     }
                                 }
                             }
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        error!("[<- hub] Failed to parse HeartbeatForward: {}", e);
+                            info!("Background setup task complete");
+                        });
                     }
                 }
             }
         }
 
         HubMessage::InferenceRequest(req) => {
-            info!("[<- hub] InferenceRequest: id={}, is_first={}, is_last={}, max_tokens={}",
-                req.id, req.is_first, req.is_last, req.max_new_tokens);
+            info!(
+                "[<- hub] InferenceRequest: id={}, is_first={}, is_last={}, max_tokens={}",
+                req.id, req.is_first, req.is_last, req.max_new_tokens
+            );
+            
             let pipeline_guard = pipeline.read().await;
+            let is_first = pipeline_guard.is_first;
+            let is_last = pipeline_guard.is_last;
             let next_hop = pipeline_guard.next_hop.clone();
             let layer_offset = pipeline_guard.layer_offset;
             let num_layers = pipeline_guard.num_layers;
@@ -659,7 +659,7 @@ Ok(_worker) => {
             drop(pipeline_guard);
 
             info!("[self] is_first={}, is_last={}, layers={}-{}, rpc_server_started={}", 
-                req.is_first, req.is_last, layer_offset, layer_offset + num_layers, rpc_server_started);
+                is_first, is_last, layer_offset, layer_offset + num_layers, rpc_server_started);
 
             if !rpc_server_started {
                 error!("[self] rpc-server not started, cannot process inference");
