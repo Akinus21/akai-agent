@@ -44,24 +44,6 @@ impl LayerLlama {
         info!("GGUF version: {}, tensors: {}, metadata: {}", 
             header.version, header.tensor_count, header.metadata_kv_count);
         
-        // Debug: print all tensor names and types
-        {
-            let mut debug_reader = GGufReader::new(&data);
-            let _ = debug_reader.read_header();
-            for _ in 0..header.metadata_kv_count {
-                let _ = debug_reader.read_meta_kv();
-            }
-            info!("Listing all tensors:");
-            for i in 0..header.tensor_count {
-                let meta = debug_reader.read_tensor_meta().map_err(|e| anyhow::anyhow!("{:?}", e)).ok();
-                if let Some(m) = meta {
-                    let info = m.to_info();
-                    info!("  tensor[{}]: name='{}', ty={:?}, shape={:?}", 
-                        i, m.name(), info.ty(), info.shape());
-                }
-            }
-        }
-        
         // Read metadata and collect config values
         let mut hidden_size = 4096usize;
         let mut vocab_size = 32000usize;
@@ -129,12 +111,12 @@ impl LayerLlama {
             layers.push(layer);
         }
         
-        let tok_embeddings = load_tensor_f32(&data, &tensor_info, "tok_embeddings.weight")?
-            .ok_or_else(|| anyhow::anyhow!("missing tok_embeddings"))?;
-        let ln_f_weight = load_tensor_f32(&data, &tensor_info, "ln_f.weight")?
-            .ok_or_else(|| anyhow::anyhow!("missing ln_f"))?;
-        let lm_head_weight = load_tensor_f32(&data, &tensor_info, "lm_head.weight")?
-            .ok_or_else(|| anyhow::anyhow!("missing lm_head"))?;
+        let tok_embeddings = load_tensor_f32(&data, &tensor_info, "token_embd.weight")?
+            .ok_or_else(|| anyhow::anyhow!("missing token_embd"))?;
+        let ln_f_weight = load_tensor_f32(&data, &tensor_info, "output_norm.weight")?
+            .ok_or_else(|| anyhow::anyhow!("missing output_norm"))?;
+        let lm_head_weight = load_tensor_f32(&data, &tensor_info, "output.weight")?
+            .ok_or_else(|| anyhow::anyhow!("missing output"))?;
         
         info!("Model loaded: {} layers assigned", layers.len());
 
