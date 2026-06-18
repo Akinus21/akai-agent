@@ -53,7 +53,7 @@ impl LayerLlama {
             }
             info!("Listing all tensors:");
             for i in 0..header.tensor_count {
-                let meta = debug_reader.read_tensor_meta().map_err(|e| anyhow::anyhow!("{:?}")).ok();
+                let meta = debug_reader.read_tensor_meta().map_err(|e| anyhow::anyhow!("{:?}", e)).ok();
                 if let Some(m) = meta {
                     let info = m.to_info();
                     info!("  tensor[{}]: name='{}', ty={:?}, shape={:?}", 
