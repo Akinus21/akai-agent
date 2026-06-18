@@ -437,7 +437,7 @@ async fn handle_hub_message(
                                                 "akai-agent",
                                                 &format!(
                                                     "{} ready for inference on port {} (custom Candle)",
-                                                    model_name, rpc_port
+                                                    model_name, llama_port
                                                 ),
                                             );
                                         }
@@ -619,7 +619,7 @@ if model_path.exists() && !pipeline_clone.read().await.ready_for_inference {
                                             "akai-agent",
                                             &format!(
                                                 "{} ready for inference on port {} (custom Candle)",
-                                                model_name, rpc_port
+                                                model_name, llama_port
                                             ),
                                         );
                                     }

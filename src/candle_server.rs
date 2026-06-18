@@ -49,8 +49,8 @@ impl CandleServer {
     }
 
     pub async fn forward(&self, hidden_states: &[f32]) -> Result<Vec<f32>> {
-        let model_guard = self.model.lock().await;
-        let model = model_guard.as_ref().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
+        let mut model_guard = self.model.lock().await;
+        let model = model_guard.as_mut().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
 
         let num_tokens = 1;
         let output = model.forward_layers(hidden_states, num_tokens)?;
