@@ -58,7 +58,7 @@ impl CandleServer {
     }
 
     pub async fn generate(&self, hidden_states: &[f32], _max_tokens: usize, temperature: f32) -> Result<(Vec<i64>, String)> {
-        let model_guard = self.model.lock().await;
+        let mut model_guard = self.model.lock().await;
         let model = model_guard.as_mut().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
 
         let num_tokens = 1;
