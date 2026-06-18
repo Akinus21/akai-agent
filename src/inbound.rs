@@ -62,7 +62,7 @@ async fn handle_inbound_connection(
             info!("Received inference request from neighbor: {} ({} tokens)", req.id, req.tokens.len());
             
             let client = Client::new();
-            let llama_url = format!("http://127.0.0.1:{}/v1/chat/completions", 8080);
+            let llama_url = format!("http://127.0.0.1:{}/v1/chat/completions", 8081);
             
             let prompt = format!("Tokens: {:?}", req.tokens);
             let body = serde_json::json!({
