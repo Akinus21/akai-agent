@@ -49,8 +49,8 @@ impl CandleServer {
     }
 
     pub async fn forward(&self, hidden_states: &[f32]) -> Result<Vec<f32>> {
-        let model_guard = self.model.lock().await;
-        let model = model_guard.as_ref().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
+        let mut model_guard = self.model.lock().await;
+        let model = model_guard.as_mut().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
 
         let num_tokens = 1;
         let output = model.forward_layers(hidden_states, num_tokens)?;
@@ -87,7 +87,7 @@ async fn handle_request(mut stream: TcpStream, server: Arc<CandleServer>) -> Res
 
     info!("HTTP {} {}", method, path);
 
-    if path == "/v1/chat/completions" && method == "POST" {
+    if *path == "/v1/chat/completions" && *method == "POST" {
         let body_start = request_str.find("\r\n\r\n").map(|s| s + 4).unwrap_or(0);
         let body = &request_str[body_start..];
         
@@ -172,7 +172,7 @@ async fn handle_request(mut stream: TcpStream, server: Arc<CandleServer>) -> Res
 
         stream.write_all(http_response.as_bytes()).await?;
         Ok(())
-    } else if path == "/health" || path == "/v1/models" {
+    } else if *path == "/health" || *path == "/v1/models" {
         let response = serde_json::json!({
             "model": "local-model",
             "object": "list",

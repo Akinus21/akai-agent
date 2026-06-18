@@ -13,7 +13,7 @@ use crate::types::{
     HubMessage, HubWorkerConfig, InferenceForward, InferenceResponse,
     PipelineState, WorkerHeartbeat, WorkerInfo,
 };
-use crate::{candle_worker, inbound, rpc, rpc_client};
+use crate::{candle_worker, inbound, rpc};
 
 pub fn notify(title: &str, body: &str) {
     info!("[notify] {}: {}", title, body);
