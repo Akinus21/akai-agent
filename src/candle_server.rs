@@ -7,11 +7,6 @@ use tracing::{error, info, warn};
 
 use crate::candle_llama::LayerLlama;
 
-const CMD_HELLO: u8 = 14;
-const CMD_INIT: u8 = 1;
-const CMD_FORWARD: u8 = 2;
-const CMD_GENERATE: u8 = 3;
-
 pub struct CandleServer {
     model: Arc<Mutex<Option<LayerLlama>>>,
     layer_offset: usize,
@@ -54,16 +49,16 @@ impl CandleServer {
     }
 
     pub async fn forward(&self, hidden_states: &[f32]) -> Result<Vec<f32>> {
-        let mut model_guard = self.model.lock().await;
-        let model = model_guard.as_mut().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
+        let model_guard = self.model.lock().await;
+        let model = model_guard.as_ref().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
 
-        let num_tokens = 1; // single token processing for now
+        let num_tokens = 1;
         let output = model.forward_layers(hidden_states, num_tokens)?;
         Ok(output)
     }
 
     pub async fn generate(&self, hidden_states: &[f32], _max_tokens: usize, temperature: f32) -> Result<(Vec<i64>, String)> {
-        let mut model_guard = self.model.lock().await;
+        let model_guard = self.model.lock().await;
         let model = model_guard.as_mut().ok_or_else(|| anyhow::anyhow!("model not initialized"))?;
 
         let num_tokens = 1;
@@ -75,145 +70,175 @@ impl CandleServer {
     }
 }
 
-async fn read_message(stream: &mut TcpStream) -> Result<(u8, Vec<u8>)> {
-    let mut cmd_buf = [0u8; 1];
-    stream.read_exact(&mut cmd_buf).await?;
-    let mut size_buf = [0u8; 8];
-    stream.read_exact(&mut size_buf).await?;
-    let size = u64::from_le_bytes(size_buf) as usize;
-    let mut data = vec![0u8; size];
-    stream.read_exact(&mut data).await?;
-    Ok((cmd_buf[0], data))
-}
-
-async fn write_message(stream: &mut TcpStream, data: &[u8]) -> Result<()> {
-    stream.write_all(&(data.len() as u64).to_le_bytes()).await?;
-    stream.write_all(data).await?;
-    Ok(())
-}
-
-async fn handle_hello(stream: &mut TcpStream) -> Result<()> {
-    info!("HELLO received");
-    let response = vec![0, 0, 1]; // major=0, minor=0, patch=1 (stub version)
-    write_message(stream, &response).await?;
-    Ok(())
-}
-
-async fn handle_init(stream: &mut TcpStream, data: &[u8], server: &CandleServer) -> Result<()> {
-    info!("INIT received: {} bytes", data.len());
-
-    let msg = String::from_utf8_lossy(data);
-    let parts: Vec<&str> = msg.split('\0').collect();
-
-    if parts.len() < 3 {
-        bail!("INIT message must have 3 null-terminated parts");
+async fn handle_request(mut stream: TcpStream, server: Arc<CandleServer>) -> Result<()> {
+    let mut buf = vec![0u8; 65536];
+    let n = stream.read(&mut buf).await?;
+    if n == 0 {
+        return Ok(());
     }
 
-    let model_path = parts[0];
-    let _layer_offset = parts[1].parse::<usize>().unwrap_or(0);
-    let _num_layers = parts[2].parse::<usize>().unwrap_or(32);
+    let request_str = String::from_utf8_lossy(&buf[..n]);
+    let lines: Vec<&str> = request_str.lines().collect();
+    
+    let method_path = lines.first().map(|s| *s).unwrap_or("");
+    let parts: Vec<&str> = method_path.split_whitespace().collect();
+    let method = parts.first().unwrap_or(&"");
+    let path = parts.get(1).unwrap_or(&"");
 
-    server.init_model(model_path).await?;
+    info!("HTTP {} {}", method, path);
 
-    let response = vec![0]; // success
-    write_message(stream, &response).await?;
-    Ok(())
-}
-
-async fn handle_forward(stream: &mut TcpStream, data: &[u8], server: &CandleServer) -> Result<()> {
-    info!("FORWARD received: {} bytes", data.len());
-
-    let hidden_states: Vec<f32> = data
-        .chunks(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect();
-
-    let output = server.forward(&hidden_states).await?;
-
-    let response: Vec<u8> = output.iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect();
-    write_message(stream, &response).await?;
-
-    Ok(())
-}
-
-async fn handle_generate(stream: &mut TcpStream, data: &[u8], server: &CandleServer) -> Result<()> {
-    info!("GENERATE received: {} bytes", data.len());
-
-    if data.len() < 8 {
-        bail!("GENERATE message too short");
-    }
-
-    let max_tokens = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    let temperature = f32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-
-    let hidden_data = &data[8..];
-    let hidden_states: Vec<f32> = hidden_data
-        .chunks(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect();
-
-    let (tokens, text) = server.generate(&hidden_states, max_tokens, temperature).await?;
-
-    let token_count = tokens.len() as u64;
-    let mut response = token_count.to_le_bytes().to_vec();
-    for token in &tokens {
-        response.extend_from_slice(&token.to_le_bytes());
-    }
-    let text_bytes = text.as_bytes();
-    response.extend_from_slice(&(text_bytes.len() as u64).to_le_bytes());
-    response.extend_from_slice(text_bytes);
-
-    write_message(stream, &response).await?;
-
-    Ok(())
-}
-
-async fn handle_client(mut stream: TcpStream, server: Arc<CandleServer>) {
-    info!("New client connection");
-
-    loop {
-        match read_message(&mut stream).await {
-            Ok((cmd, data)) => {
-                let result = match cmd {
-                    CMD_HELLO => handle_hello(&mut stream).await,
-                    CMD_INIT => handle_init(&mut stream, &data, &server).await,
-                    CMD_FORWARD => handle_forward(&mut stream, &data, &server).await,
-                    CMD_GENERATE => handle_generate(&mut stream, &data, &server).await,
-                    _ => {
-                        warn!("Unknown command: {}", cmd);
-                        break;
-                    }
-                };
-
-                if let Err(e) = result {
-                    error!("Error handling command {}: {}", cmd, e);
-                    break;
-                }
-            }
+    if path == "/v1/chat/completions" && method == "POST" {
+        let body_start = request_str.find("\r\n\r\n").map(|s| s + 4).unwrap_or(0);
+        let body = &request_str[body_start..];
+        
+        let body_json: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
             Err(e) => {
-                error!("Failed to read message: {}", e);
-                break;
+                error!("Failed to parse request body: {}", e);
+                send_error(&mut stream, 400, "Invalid JSON").await?;
+                return Ok(());
             }
-        }
-    }
+        };
 
-    info!("Client disconnected");
+        let model = body_json.get("model").and_then(|v| v.as_str()).unwrap_or("local-model");
+        let messages = body_json.get("messages").and_then(|v| v.as_array());
+        let temperature = body_json.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7) as f32;
+        let max_tokens = body_json.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+        let stream_flag = body_json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let user_message = messages
+            .and_then(|msgs| {
+                msgs.iter().rev().find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+            })
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+
+        info!("Chat request: model={}, temp={}, max_tokens={}, stream={}", model, temperature, max_tokens, stream_flag);
+
+        let hidden_size = {
+            let model_guard = server.model.lock().await;
+            if let Some(m) = model_guard.as_ref() {
+                m.hidden_size()
+            } else {
+                1536
+            }
+        };
+
+        let dummy_emb = vec![0.0f32; hidden_size];
+
+        let (_tokens, text) = server.generate(&dummy_emb, max_tokens, temperature).await.unwrap_or_else(|_| {
+            (vec![0], "Error generating response".to_string())
+        });
+
+        let response = if stream_flag {
+            format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{}\"}}}}]}}\r\n\r\ndata: [DONE]\r\n\r\n",
+                text.replace("\"", "\\\"")
+            )
+        } else {
+            serde_json::json!({
+                "id": "chatcmpl-local",
+                "object": "chat.completion",
+                "created": 0,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": text
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2
+                }
+            }).to_string()
+        };
+
+        let response_len = response.len();
+        let http_response = format!(
+            "HTTP/1.1 200 OK\r\n\
+            Content-Type: {}\r\n\
+            Content-Length: {}\r\n\
+            \r\n\
+            {}",
+            if stream_flag { "text/event-stream" } else { "application/json" },
+            response_len,
+            response
+        );
+
+        stream.write_all(http_response.as_bytes()).await?;
+        Ok(())
+    } else if path == "/health" || path == "/v1/models" {
+        let response = serde_json::json!({
+            "model": "local-model",
+            "object": "list",
+            "data": [{
+                "id": "local-model",
+                "object": "model",
+                "created": 0,
+                "owned_by": "local"
+            }]
+        }).to_string();
+
+        let http_response = format!(
+            "HTTP/1.1 200 OK\r\n\
+            Content-Type: application/json\r\n\
+            Content-Length: {}\r\n\
+            \r\n\
+            {}",
+            response.len(),
+            response
+        );
+
+        stream.write_all(http_response.as_bytes()).await?;
+        Ok(())
+    } else {
+        send_error(&mut stream, 404, "Not found").await?;
+        Ok(())
+    }
 }
 
-pub async fn run_server(port: u16, layer_offset: usize, num_layers: usize) -> Result<()> {
+async fn send_error(stream: &mut TcpStream, code: u16, message: &str) -> Result<()> {
+    let response = format!(
+        "HTTP/1.1 {} \r\n\
+        Content-Type: application/json\r\n\
+        Content-Length: {}\r\n\
+        \r\n\
+        {{\"error\": {{\"message\": \"{}\", \"type\": \"server_error\"}}}}",
+        code,
+        message.len() + 50,
+        message
+    );
+    stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+pub async fn run_server(port: u16, server: Arc<CandleServer>) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
-    info!("GGUS server listening on {}", addr);
-
-    let server = Arc::new(CandleServer::new(layer_offset, num_layers));
+    info!("GGUS HTTP server listening on {}", addr);
 
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 let server = server.clone();
-                tokio::spawn(handle_client(stream, server));
+                tokio::spawn(async move {
+                    if let Err(e) = handle_request(stream, server).await {
+                        error!("Error handling request: {}", e);
+                    }
+                });
+            }
+            Err(e) => {
+                error!("Failed to accept connection: {}", e);
+            }
+        }
+    }
+}
+                });
             }
             Err(e) => {
                 error!("Failed to accept connection: {}", e);

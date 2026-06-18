@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::candle_server::{run_server, CandleServer};
@@ -19,13 +20,11 @@ impl CandleWorker {
 
         let server = Arc::new(CandleServer::new(layer_offset, num_layers));
 
-        // Initialize the model first
         server.init_model(&model_path).await?;
 
-        // Spawn the server task
-        let _server = server;
+        let server_for_spawn = server.clone();
         let join_handle = tokio::spawn(async move {
-            if let Err(e) = run_server(port, layer_offset, num_layers).await {
+            if let Err(e) = run_server(port, server_for_spawn).await {
                 error!("Candle server error: {}", e);
             }
         });

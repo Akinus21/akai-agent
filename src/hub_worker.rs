@@ -415,19 +415,19 @@ async fn handle_hub_message(
                                 if !pipeline_clone.read().await.ready_for_inference {
                                     let layer_offset = layer_offset;
                                     let num_layers = num_layers;
-                                    let rpc_port = config.rpc_port + 1;
+                                    let llama_port = config.llama_port;
                                     let mp = model_path.to_string_lossy().to_string();
 
                                     info!("Starting custom Candle inference server...");
                                     match candle_worker::CandleWorker::start(
-                                        rpc_port,
+                                        llama_port,
                                         mp,
                                         layer_offset,
                                         num_layers,
                                     ).await {
                                         Ok(_worker) => {
                                             info!("Candle server started on port {} (layers {}-{})", 
-                                                rpc_port, layer_offset, layer_offset + num_layers);
+                                                llama_port, layer_offset, layer_offset + num_layers);
                                             let mut pg = pipeline_clone.write().await;
                                             pg.rpc_server_started = true;
                                             pg.ready_for_inference = true;
@@ -598,19 +598,19 @@ if model_path.exists() && !pipeline_clone.read().await.ready_for_inference {
                                 let mut pg = pipeline_clone.write().await;
                                 let layer_offset = pg.layer_offset;
                                 let num_layers = pg.num_layers;
-                                let rpc_port = config.rpc_port + 1;
+                                let llama_port = config.llama_port;
                                 let mp = model_path.to_string_lossy().to_string();
 
                                 info!("Starting custom Candle inference server...");
                                 match candle_worker::CandleWorker::start(
-                                    rpc_port,
+                                    llama_port,
                                     mp,
                                     layer_offset,
                                     num_layers,
                                 ).await {
                                     Ok(_worker) => {
                                         info!("Candle server started on port {} (layers {}-{})", 
-                                            rpc_port, layer_offset, layer_offset + num_layers);
+                                            llama_port, layer_offset, layer_offset + num_layers);
                                         pg.rpc_server_started = true;
                                         pg.ready_for_inference = true;
                                         pg.loaded_layer_offset = Some(layer_offset);
